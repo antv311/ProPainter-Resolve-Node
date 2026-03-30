@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python model/modules/turboquant_kv.py)",
+      "Bash(c:/Users/tony/venvs/propainter/Scripts/python.exe -c \"import torch; print\\(torch.__version__\\)\")",
+      "Read(//c/Users/tony/venvs/venvbp/Lib/site-packages/**)",
+      "Bash(c:/Users/tony/venvs/venvbp/Scripts/python.exe -c \"import torch; print\\(torch.__version__\\); print\\(torch.cuda.is_available\\(\\)\\)\")",
+      "Bash(c:/Users/tony/venvs/venvbp/Scripts/python.exe model/modules/turboquant_kv.py)"
+    ]
+  }
+}
