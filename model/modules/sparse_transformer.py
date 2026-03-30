@@ -4,6 +4,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+def _build_anchor_mask(T_ind, N_tokens):  # TURBOQUANT:
+    """Return bool [N_tokens] marking first and last temporal positions as anchors."""  # TURBOQUANT:
+    if T_ind is None:  # TURBOQUANT:
+        return None  # TURBOQUANT:
+    n_t = len(T_ind)  # TURBOQUANT:
+    if n_t < 2:  # TURBOQUANT:
+        return None  # TURBOQUANT:
+    N_spatial = N_tokens // n_t  # TURBOQUANT:
+    mask = torch.zeros(N_tokens, dtype=torch.bool, device=T_ind.device)  # TURBOQUANT:
+    mask[:N_spatial] = True  # TURBOQUANT: first frame tokens
+    mask[(n_t - 1) * N_spatial : n_t * N_spatial] = True  # TURBOQUANT: last frame tokens
+    return mask  # TURBOQUANT:
+
 class SoftSplit(nn.Module):
     def __init__(self, channel, hidden, kernel_size, stride, padding):
         super(SoftSplit, self).__init__()
@@ -115,8 +129,9 @@ def window_partition(x, window_size, n_head):
     return windows
 
 class SparseWindowAttention(nn.Module):
-    def __init__(self, dim, n_head, window_size, pool_size=(4,4), qkv_bias=True, attn_drop=0., proj_drop=0., 
-                pooling_token=True):
+    def __init__(self, dim, n_head, window_size, pool_size=(4,4), qkv_bias=True, attn_drop=0., proj_drop=0.,
+                pooling_token=True,
+                use_turboquant=False, tq_bits=3):  # TURBOQUANT: add params
         super().__init__()
         assert dim % n_head == 0
         # key, query, value projections for all heads
@@ -153,12 +168,16 @@ class SparseWindowAttention(nn.Module):
             self.register_buffer("valid_ind_rolled", masrool_k.nonzero(as_tuple=False).view(-1))
 
         self.max_pool = nn.MaxPool2d(window_size, window_size, (0, 0))
+        self.use_turboquant = use_turboquant  # TURBOQUANT:
+        if use_turboquant:  # TURBOQUANT:
+            from model.modules.turboquant_kv import BidirectionalTQKVCache  # TURBOQUANT:
+            self.tq_cache = BidirectionalTQKVCache(c_head=dim // n_head, bits=tq_bits)  # TURBOQUANT:
 
 
     def forward(self, x, mask=None, T_ind=None, attn_mask=None):
         b, t, h, w, c = x.shape # 20 36
         w_h, w_w = self.window_size[0], self.window_size[1]
-        c_head = c // self.n_head
+        c_head = c // self.n_head  # TURBOQUANT: extracted for use in both paths
         n_wh = math.ceil(h / self.window_size[0])
         n_ww = math.ceil(w / self.window_size[1])
         new_h = n_wh * self.window_size[0] # 20
@@ -247,10 +266,19 @@ class SparseWindowAttention(nn.Module):
                     win_k_t = win_k_t.view(n_wh*n_ww, self.n_head, t*w_h*w_w, c_head)
                     win_v_t = win_v_t.view(n_wh*n_ww, self.n_head, t*w_h*w_w, c_head)
 
-                att_t = (win_q_t @ win_k_t.transpose(-2, -1)) * (1.0 / math.sqrt(win_q_t.size(-1)))
-                att_t = F.softmax(att_t, dim=-1)
-                att_t = self.attn_drop(att_t)
-                y_t = att_t @ win_v_t 
+                if self.use_turboquant:  # TURBOQUANT: replace attention with TurboQuant
+                    anchor_mask = _build_anchor_mask(T_ind, win_k_t.shape[2])  # TURBOQUANT:
+                    compressed_kv = self.tq_cache.compress(win_k_t, win_v_t, anchor_mask)  # TURBOQUANT:
+                    y_t = self.tq_cache.compute_attention(  # TURBOQUANT:
+                        win_q_t, compressed_kv,  # TURBOQUANT:
+                        scale=1.0 / math.sqrt(c_head),  # TURBOQUANT:
+                        dropout_fn=self.attn_drop,  # TURBOQUANT:
+                    )  # TURBOQUANT:
+                else:  # TURBOQUANT:
+                    att_t = (win_q_t @ win_k_t.transpose(-2, -1)) * (1.0 / math.sqrt(win_q_t.size(-1)))
+                    att_t = F.softmax(att_t, dim=-1)
+                    att_t = self.attn_drop(att_t)
+                    y_t = att_t @ win_v_t
                 
                 out[i, mask_ind_i] = y_t.view(-1, self.n_head, t, w_h*w_w, c_head)
 
@@ -283,10 +311,12 @@ class SparseWindowAttention(nn.Module):
 
 class TemporalSparseTransformer(nn.Module):
     def __init__(self, dim, n_head, window_size, pool_size,
-                norm_layer=nn.LayerNorm, t2t_params=None):
+                norm_layer=nn.LayerNorm, t2t_params=None,
+                use_turboquant=False, tq_bits=3):  # TURBOQUANT: add params
         super().__init__()
         self.window_size = window_size
-        self.attention = SparseWindowAttention(dim, n_head, window_size, pool_size)
+        self.attention = SparseWindowAttention(dim, n_head, window_size, pool_size,
+                                               use_turboquant=use_turboquant, tq_bits=tq_bits)  # TURBOQUANT:
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
         self.mlp = FusionFeedForward(dim, t2t_params=t2t_params)
@@ -315,12 +345,14 @@ class TemporalSparseTransformer(nn.Module):
 
 
 class TemporalSparseTransformerBlock(nn.Module):
-    def __init__(self, dim, n_head, window_size, pool_size, depths, t2t_params=None):
+    def __init__(self, dim, n_head, window_size, pool_size, depths, t2t_params=None,
+                use_turboquant=False, tq_bits=3):  # TURBOQUANT: add params
         super().__init__()
         blocks = []
         for i in range(depths):
              blocks.append(
-                TemporalSparseTransformer(dim, n_head, window_size, pool_size, t2t_params=t2t_params)
+                TemporalSparseTransformer(dim, n_head, window_size, pool_size, t2t_params=t2t_params,
+                                          use_turboquant=use_turboquant, tq_bits=tq_bits)  # TURBOQUANT:
              )
         self.transformer = nn.Sequential(*blocks)
         self.depths = depths
