@@ -11,7 +11,7 @@ from tqdm import tqdm
 import torch
 
 
-from model.modules.flow_comp_raft import RAFT_bi
+from model.modules.flow_comp_waft import WAFT_bi
 from model.recurrent_flow_completion import RecurrentFlowCompleteNet
 from model.propainter import InpaintGenerator
 from utils.download_util import load_file_from_url
@@ -293,9 +293,9 @@ if __name__ == '__main__':
     ##############################################
     # set up RAFT and flow competition model
     ##############################################
-    ckpt_path = load_file_from_url(url=os.path.join(pretrain_model_url, 'raft-things.pth'), 
+    ckpt_path = load_file_from_url(url=os.path.join(pretrain_model_url, 'waft-downstream.pth'),
                                     model_dir='weights', progress=True, file_name=None)
-    fix_raft = RAFT_bi(ckpt_path, device)
+    fix_raft = WAFT_bi(ckpt_path, device)
     
     ckpt_path = load_file_from_url(url=os.path.join(pretrain_model_url, 'recurrent_flow_completion.pth'), 
                                     model_dir='weights', progress=True, file_name=None)
