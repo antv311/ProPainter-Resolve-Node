@@ -9,7 +9,7 @@ from PIL import Image
 from tqdm import tqdm
 
 import torch
-import torchvision
+
 
 from model.modules.flow_comp_raft import RAFT_bi
 from model.recurrent_flow_completion import RecurrentFlowCompleteNet
@@ -48,11 +48,16 @@ def resize_frames(frames, size=None):
 #  read frames from video
 def read_frame_from_videos(frame_root):
     if frame_root.endswith(('mp4', 'mov', 'avi', 'MP4', 'MOV', 'AVI')): # input video path
-        video_name = os.path.basename(frame_root)[:-4]
-        vframes, aframes, info = torchvision.io.read_video(filename=frame_root, pts_unit='sec') # RGB
-        frames = list(vframes.numpy())
-        frames = [Image.fromarray(f) for f in frames]
-        fps = info['video_fps']
+        cap = cv2.VideoCapture(frame_root)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frames = []
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(Image.fromarray(frame))
+        cap.release()
     else:
         video_name = os.path.basename(frame_root)
         frames = []
