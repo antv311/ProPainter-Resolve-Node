@@ -83,38 +83,56 @@ def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
     masks_img = []
     masks_dilated = []
     flow_masks = []
-    
+
     if mpath.endswith(('jpg', 'jpeg', 'png', 'JPG', 'JPEG', 'PNG')): # input single img path
-       masks_img = [Image.open(mpath)]
-    else:  
+        masks_img = [Image.open(mpath)]
+    else:
         mnames = sorted(os.listdir(mpath))
         for mp in mnames:
             masks_img.append(Image.open(os.path.join(mpath, mp)))
-          
+
+    # Expand a single mask image to length copies before entering the dilation loop
+    # so every frame has an explicit entry and chunked processing works uniformly.
+    if len(masks_img) == 1:
+        masks_img = masks_img * length
+
+    # Resize all frames and convert to uint8 numpy arrays upfront
+    raw = []
     for mask_img in masks_img:
         if size is not None:
             mask_img = mask_img.resize(size, Image.NEAREST)
-        mask_img = np.array(mask_img.convert('L'))
+        raw.append(np.array(mask_img.convert('L')))
 
-        # Dilate 8 pixel so that all known pixel is trustworthy
+    # Process dilation in chunks of 32 frames so memory stays bounded for long videos.
+    # scipy.ndimage.binary_dilation accepts a leading batch dimension (N, H, W) when
+    # iterations is given — the struct element is broadcast across frames.
+    chunk_size = 32
+    for chunk_start in range(0, len(raw), chunk_size):
+        chunk = raw[chunk_start : chunk_start + chunk_size]
+        batch = np.stack(chunk, axis=0)  # [N, H, W]
+
+        # Dilate 8 pixels so that all known pixels are trustworthy
         if flow_mask_dilates > 0:
-            flow_mask_img = scipy.ndimage.binary_dilation(mask_img, iterations=flow_mask_dilates).astype(np.uint8)
+            flow_batch = scipy.ndimage.binary_dilation(
+                batch, iterations=flow_mask_dilates
+            ).astype(np.uint8)
         else:
-            flow_mask_img = binary_mask(mask_img).astype(np.uint8)
-        # Close the small holes inside the foreground objects
-        # flow_mask_img = cv2.morphologyEx(flow_mask_img, cv2.MORPH_CLOSE, np.ones((21, 21),np.uint8)).astype(bool)
-        # flow_mask_img = scipy.ndimage.binary_fill_holes(flow_mask_img).astype(np.uint8)
-        flow_masks.append(Image.fromarray(flow_mask_img * 255))
-        
+            flow_batch = np.stack(
+                [binary_mask(f).astype(np.uint8) for f in chunk], axis=0
+            )
+
         if mask_dilates > 0:
-            mask_img = scipy.ndimage.binary_dilation(mask_img, iterations=mask_dilates).astype(np.uint8)
+            mask_batch = scipy.ndimage.binary_dilation(
+                batch, iterations=mask_dilates
+            ).astype(np.uint8)
         else:
-            mask_img = binary_mask(mask_img).astype(np.uint8)
-        masks_dilated.append(Image.fromarray(mask_img * 255))
-    
-    if len(masks_img) == 1:
-        flow_masks = flow_masks * length
-        masks_dilated = masks_dilated * length
+            mask_batch = np.stack(
+                [binary_mask(f).astype(np.uint8) for f in chunk], axis=0
+            )
+
+        for flow_frame, mask_frame in zip(flow_batch, mask_batch):
+            flow_masks.append(Image.fromarray(flow_frame * 255))
+            masks_dilated.append(Image.fromarray(mask_frame * 255))
 
     return flow_masks, masks_dilated
 
