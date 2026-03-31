@@ -1,5 +1,5 @@
 # CLAUDE.md — ProPainter-Resolve-Node
-Last updated: 2026-03-29
+Last updated: 2026-03-31
 
 ---
 
@@ -29,7 +29,7 @@ Get the inference stack fully modernized and running on Python 3.14 + CUDA 13.1 
 
 Deliverables:
 - Python 3.14 venv with source-built PyTorch (CUDA 13.1) ✅ Wheel built & cached
-- torchvision ❌ SKIPPED — see note below
+- torchvision ✅ ELIMINATED — deform_conv2d replaced with tvdcn 1.1.0; read_video replaced with cv2
 - opencv-python source build ✅ Wheel built & cached
 - xformers source build ✅ Wheel built & cached
 - WAFT replacing RAFT as the optical flow backbone ⬜ Pending
@@ -88,7 +88,7 @@ C:\Users\tony\
 | CMake | 4.3.1 | ✅ Installed (`C:\tools\cmake\cmake-4.3.1\bin`) |
 | Ninja | 1.13.2 | ✅ Installed (`C:\tools\ninja`) |
 | PyTorch | 2.12.0a0+gitfafc7d6, cp314, win_amd64 | ✅ Wheel built & cached |
-| torchvision | SKIPPED | ❌ Not needed — see note |
+| torchvision | ELIMINATED | ✅ deform_conv2d → tvdcn 1.1.0; read_video → cv2 |
 | opencv-python | 4.13.0.92, cp314, win_amd64 | ✅ Wheel built & cached |
 | xformers | 0.0.35+6e9337ce, cp314 (tagged py39), win_amd64 | ✅ Wheel built & cached |
 

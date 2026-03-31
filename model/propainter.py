@@ -4,7 +4,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision
+from tvdcn.ops import deform_conv2d
 
 from einops import rearrange
 
@@ -64,9 +64,9 @@ class DeformableAlignment(ModulatedDeformConv2d):
         # mask
         mask = torch.sigmoid(mask)
 
-        return torchvision.ops.deform_conv2d(x, offset, self.weight, self.bias, 
-                                             self.stride, self.padding,
-                                             self.dilation, mask)
+        return deform_conv2d(x, offset, self.weight, self.bias,
+                             self.stride, self.padding,
+                             self.dilation, mask)
 
 
 class BidirectionalPropagation(nn.Module):

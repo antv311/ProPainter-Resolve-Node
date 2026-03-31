@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision
+from tvdcn.ops import deform_conv2d
 
 from model.modules.deformconv import ModulatedDeformConv2d
 from .misc import constant_init
@@ -39,9 +39,9 @@ class SecondOrderDeformableAlignment(ModulatedDeformConv2d):
         # mask
         mask = torch.sigmoid(mask)
 
-        return torchvision.ops.deform_conv2d(x, offset, self.weight, self.bias, 
-                                             self.stride, self.padding,
-                                             self.dilation, mask)
+        return deform_conv2d(x, offset, self.weight, self.bias,
+                             self.stride, self.padding,
+                             self.dilation, mask)
 
 class BidirectionalPropagation(nn.Module):
     def __init__(self, channel):
