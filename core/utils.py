@@ -12,7 +12,6 @@ import matplotlib
 import matplotlib.patches as patches
 from matplotlib.path import Path
 from matplotlib import pyplot as plt
-from torchvision import transforms
 
 # matplotlib.use('agg')
 
@@ -92,7 +91,7 @@ class TestZipReader(object):
 
 
 def to_tensors():
-    return transforms.Compose([Stack(), ToTorchFormatTensor()])
+    return lambda img_group: ToTorchFormatTensor()(Stack()(img_group))
 
 
 class GroupRandomHorizontalFlowFlip(object):
