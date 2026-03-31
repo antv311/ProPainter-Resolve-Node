@@ -642,6 +642,7 @@ def build_ui() -> gr.Blocks:
                 video_input = gr.Video(
                     label="Input video",
                     sources=["upload"],
+                    format="mp4",
                     height=280,
                 )
 
@@ -720,6 +721,13 @@ def build_ui() -> gr.Blocks:
                     )
                     vram_timer = gr.Timer(value=2)
 
+                upload_log = gr.Textbox(
+                    label="Upload log",
+                    lines=5,
+                    autoscroll=True,
+                    interactive=False,
+                )
+
                 log_box = gr.Textbox(
                     label="Log",
                     lines=10,
@@ -732,19 +740,41 @@ def build_ui() -> gr.Blocks:
 
         # ── event wiring ──────────────────────────────────────────────────────
 
-        # When video is uploaded, load first frame into the paint editor
+        # When video is uploaded: populate paint editor + write upload diagnostics
         def _on_video_upload(video_path):
             if video_path is None:
-                return gr.update()
+                return gr.update(), ""
+
+            lines = []
+            lines.append(f"Path:  {video_path}")
+            try:
+                lines.append(f"Size:  {os.path.getsize(video_path) / 1e6:.2f} MB")
+            except OSError as e:
+                lines.append(f"Size:  ERROR — {e}")
+
+            cap = cv2.VideoCapture(video_path)
+            lines.append(f"cv2.isOpened():  {cap.isOpened()}")
+            if cap.isOpened():
+                n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                fps_cap  = cap.get(cv2.CAP_PROP_FPS)
+                width    = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                lines.append(f"Frames: {n_frames}  |  FPS: {fps_cap:.2f}  |  {width}×{height}")
+            cap.release()
+
+            editor_update = gr.update()
             frame = _first_frame_numpy(video_path)
-            if frame is None:
-                return gr.update()
-            return gr.update(value={"background": frame, "layers": [], "composite": frame})
+            if frame is not None:
+                editor_update = gr.update(
+                    value={"background": frame, "layers": [], "composite": frame}
+                )
+
+            return editor_update, "\n".join(lines)
 
         video_input.change(
             fn=_on_video_upload,
             inputs=[video_input],
-            outputs=[mask_editor],
+            outputs=[mask_editor, upload_log],
         )
 
         # Switch between upload / paint / video mask inputs
