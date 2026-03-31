@@ -152,7 +152,7 @@ def _patch_turboquant(enabled: bool, bits: int = 3):
 
 def _read_video(path: str):
     """Return (list[PIL.Image], fps)."""
-    cap = cv2.VideoCapture(path)
+    cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
     fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
     frames = []
     while True:
@@ -166,7 +166,7 @@ def _read_video(path: str):
 
 def _first_frame_numpy(video_path: str) -> np.ndarray | None:
     """Extract first frame as RGB numpy array."""
-    cap = cv2.VideoCapture(video_path)
+    cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
     ret, frame = cap.read()
     cap.release()
     if not ret:
@@ -211,7 +211,7 @@ def _masks_from_video(path: str, video_length: int, size: tuple,
     White pixels (>127) are the region to inpaint.
     If the mask video is shorter than video_length, the last frame is tiled.
     """
-    cap = cv2.VideoCapture(path)
+    cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
     raw = []
     while True:
         ret, frame = cap.read()
@@ -641,8 +641,8 @@ def _ffmpeg_transcode(input_path: str):
         return input_path, False, lines
 
     lines.append(f"ffmpeg: {ffmpeg}")
-    stem        = Path(input_path).stem
-    output_path = str(Path(input_path).parent / f"{stem}_h264.mp4")
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    output_path = os.path.join(RESULTS_DIR, Path(input_path).stem + "_h264.mp4")
     cmd = [
         ffmpeg, '-y', '-i', input_path,
         '-c:v', 'libx264', '-crf', '18', '-preset', 'fast',
@@ -799,7 +799,7 @@ def build_ui() -> gr.Blocks:
             except OSError as e:
                 lines.append(f"Size:  ERROR — {e}")
 
-            cap = cv2.VideoCapture(video_path)
+            cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
             lines.append(f"cv2.isOpened():  {cap.isOpened()}")
             if cap.isOpened():
                 lines.append(
