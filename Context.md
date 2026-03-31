@@ -1,5 +1,5 @@
 # CLAUDE.md — ProPainter-Resolve-Node
-Last updated: 2026-03-31
+Last updated: 2026-03-30
 
 ---
 
@@ -32,9 +32,9 @@ Deliverables:
 - torchvision ✅ ELIMINATED — deform_conv2d replaced with tvdcn 1.1.0; read_video replaced with cv2
 - opencv-python source build ✅ Wheel built & cached
 - xformers source build ✅ Wheel built & cached
-- WAFT replacing RAFT as the optical flow backbone ⬜ Pending
-- TurboQuant integrated into ProPainter's spatiotemporal attention layers ⬜ Pending
-- Gradio UI for end-to-end testing of inpainting on real client footage types ⬜ Pending
+- WAFT replacing RAFT as the optical flow backbone ✅ Code complete (waft-downstream.pth checkpoint still needed)
+- TurboQuant integrated into ProPainter's spatiotemporal attention layers ✅ Complete (cosine sim 0.9675)
+- Gradio UI for end-to-end testing of inpainting on real client footage types ✅ Complete
 - All dead training/eval code removed from the repo ⬜ Pending
 
 ### Phase 2 — DaVinci Resolve Node
