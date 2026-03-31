@@ -11,6 +11,8 @@ import time
 import threading
 import tempfile
 import traceback
+import subprocess
+import shutil
 from pathlib import Path
 from scipy.ndimage import binary_dilation
 
@@ -620,6 +622,52 @@ def run_inpainting(
     yield *_final(out_mp4, cmp_mp4),
 
 
+# ── ffmpeg transcode helper ───────────────────────────────────────────────────
+
+_FFMPEG_FALLBACK = r'C:\tools\ffmpeg\bin\ffmpeg.exe'
+
+
+def _ffmpeg_transcode(input_path: str):
+    """
+    Transcode input_path to H.264 / yuv420p MP4 for browser compatibility.
+    Returns (output_path, success, log_lines).
+    output_path is the H.264 path on success, or input_path on failure.
+    """
+    ffmpeg = shutil.which('ffmpeg') or (_FFMPEG_FALLBACK if os.path.isfile(_FFMPEG_FALLBACK) else None)
+
+    lines = []
+    if ffmpeg is None:
+        lines.append("⚠ ffmpeg not found — checked PATH and C:\\tools\\ffmpeg\\bin\\ffmpeg.exe")
+        return input_path, False, lines
+
+    lines.append(f"ffmpeg: {ffmpeg}")
+    stem        = Path(input_path).stem
+    output_path = str(Path(input_path).parent / f"{stem}_h264.mp4")
+    cmd = [
+        ffmpeg, '-y', '-i', input_path,
+        '-c:v', 'libx264', '-crf', '18', '-preset', 'fast',
+        '-pix_fmt', 'yuv420p', '-c:a', 'copy',
+        output_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode == 0:
+            out_mb = os.path.getsize(output_path) / 1e6 if os.path.exists(output_path) else 0.0
+            lines.append(f"Transcode OK → {output_path}  ({out_mb:.2f} MB)")
+            return output_path, True, lines
+        else:
+            lines.append(f"ffmpeg exit {result.returncode}")
+            # last 800 chars of stderr is usually enough to see what went wrong
+            lines.append(result.stderr[-800:].strip() if result.stderr else "(no stderr)")
+            return input_path, False, lines
+    except subprocess.TimeoutExpired:
+        lines.append("ffmpeg timed out after 300 s")
+        return input_path, False, lines
+    except Exception as exc:
+        lines.append(f"ffmpeg error: {exc}")
+        return input_path, False, lines
+
+
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
 
 def build_ui() -> gr.Blocks:
@@ -740,13 +788,12 @@ def build_ui() -> gr.Blocks:
 
         # ── event wiring ──────────────────────────────────────────────────────
 
-        # When video is uploaded: populate paint editor + write upload diagnostics
+        # When video is uploaded: log diagnostics, transcode, populate paint editor
         def _on_video_upload(video_path):
             if video_path is None:
-                return gr.update(), ""
+                return gr.update(), "", gr.update()
 
-            lines = []
-            lines.append(f"Path:  {video_path}")
+            lines = [f"Path:  {video_path}"]
             try:
                 lines.append(f"Size:  {os.path.getsize(video_path) / 1e6:.2f} MB")
             except OSError as e:
@@ -755,26 +802,51 @@ def build_ui() -> gr.Blocks:
             cap = cv2.VideoCapture(video_path)
             lines.append(f"cv2.isOpened():  {cap.isOpened()}")
             if cap.isOpened():
-                n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                fps_cap  = cap.get(cv2.CAP_PROP_FPS)
-                width    = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                height   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                lines.append(f"Frames: {n_frames}  |  FPS: {fps_cap:.2f}  |  {width}×{height}")
+                lines.append(
+                    f"Frames: {int(cap.get(cv2.CAP_PROP_FRAME_COUNT))}  |  "
+                    f"FPS: {cap.get(cv2.CAP_PROP_FPS):.2f}  |  "
+                    f"{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}×"
+                    f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}"
+                )
             cap.release()
 
+            h264_path, ok, tx_lines = _ffmpeg_transcode(video_path)
+            lines.extend(tx_lines)
+            if not ok:
+                lines.append("⚠ Using original file — browser preview may not work")
+
             editor_update = gr.update()
-            frame = _first_frame_numpy(video_path)
+            frame = _first_frame_numpy(h264_path)
             if frame is not None:
                 editor_update = gr.update(
                     value={"background": frame, "layers": [], "composite": frame}
                 )
 
-            return editor_update, "\n".join(lines)
+            return editor_update, "\n".join(lines), gr.update(value=h264_path)
 
         video_input.change(
             fn=_on_video_upload,
             inputs=[video_input],
-            outputs=[mask_editor, upload_log],
+            outputs=[mask_editor, upload_log, video_input],
+        )
+
+        # When mask video is uploaded: transcode and log
+        def _on_mask_video_upload(video_path):
+            if video_path is None:
+                return "", gr.update()
+
+            lines = [f"Mask video: {video_path}"]
+            h264_path, ok, tx_lines = _ffmpeg_transcode(video_path)
+            lines.extend(tx_lines)
+            if not ok:
+                lines.append("⚠ Using original file")
+
+            return "\n".join(lines), gr.update(value=h264_path)
+
+        mask_video.change(
+            fn=_on_mask_video_upload,
+            inputs=[mask_video],
+            outputs=[upload_log, mask_video],
         )
 
         # Switch between upload / paint / video mask inputs
