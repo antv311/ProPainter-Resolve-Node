@@ -12,6 +12,7 @@ import threading
 import tempfile
 import traceback
 from pathlib import Path
+from scipy.ndimage import binary_dilation
 
 import cv2
 import numpy as np
@@ -199,6 +200,49 @@ def _mask_from_upload(path: str | None, size: tuple) -> Image.Image | None:
     return Image.open(path).convert("L").resize(size, Image.NEAREST)
 
 
+def _masks_from_video(path: str, video_length: int, size: tuple,
+                      flow_dilates: int = 4, mask_dilates: int = 4):
+    """
+    Read a per-frame mask video (MOV/MP4/etc.) via cv2.
+    Returns (flow_masks, masks_dilated) as lists of PIL.Image mode 'L' of
+    length video_length — same format as inference_propainter.read_mask().
+    White pixels (>127) are the region to inpaint.
+    If the mask video is shorter than video_length, the last frame is tiled.
+    """
+    cap = cv2.VideoCapture(path)
+    raw = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        gray = frame[:, :, 0]  # first channel; for white/black masks any channel works
+        resized = cv2.resize(gray, size, interpolation=cv2.INTER_NEAREST)
+        raw.append((resized > 127).astype(np.uint8))
+    cap.release()
+
+    if not raw:
+        return None, None
+
+    # Pad to video_length if mask video is shorter, truncate if longer
+    while len(raw) < video_length:
+        raw.append(raw[-1].copy())
+    raw = raw[:video_length]
+
+    batch = np.stack(raw, axis=0)  # [N, H, W] uint8 0/1
+
+    def _dilate(arr, iterations):
+        if iterations <= 0:
+            return arr
+        return binary_dilation(arr, iterations=iterations).astype(np.uint8)
+
+    flow_batch = _dilate(batch, flow_dilates)
+    mask_batch = _dilate(batch, mask_dilates)
+
+    flow_masks    = [Image.fromarray(f * 255, 'L') for f in flow_batch]
+    masks_dilated = [Image.fromarray(m * 255, 'L') for m in mask_batch]
+    return flow_masks, masks_dilated
+
+
 def _write_comparison(left_frames, right_frames, fps: float, out_path: str):
     """Write side-by-side (masked | inpainted) MP4."""
     with imageio.get_writer(out_path, fps=fps, quality=7, macro_block_size=1) as w:
@@ -215,6 +259,7 @@ def run_inpainting(
     mask_mode,
     mask_upload,
     mask_editor,
+    mask_video,
     neighbor_length,
     ref_stride,
     subvideo_length,
@@ -258,6 +303,11 @@ def run_inpainting(
             _log("❌  Paint mode selected but nothing painted. Draw the region to inpaint.")
             yield *_state(),
             return
+
+    if mask_mode == "video" and mask_video is None:
+        _log("❌  Video mask mode selected but no mask video provided.")
+        yield *_state(),
+        return
 
     # ── load models ───────────────────────────────────────────────────────────
     _log("── Loading models ─────────────────────────────────────")
@@ -312,26 +362,38 @@ def run_inpainting(
     progress(0.08, desc="Building masks…")
 
     try:
-        raw_mask = (
-            _mask_from_upload(mask_upload, size)
-            if mask_mode == "upload"
-            else _mask_from_editor(mask_editor, size)
-        )
-        if raw_mask is None:
-            _log("❌  Could not extract mask.")
-            yield *_state(),
-            return
+        if mask_mode == "video":
+            flow_masks, masks_dilated = _masks_from_video(
+                mask_video, video_length, size,
+                flow_dilates=int(mask_dilation),
+                mask_dilates=int(mask_dilation),
+            )
+            if flow_masks is None:
+                _log("❌  Could not read any frames from the mask video.")
+                yield *_state(),
+                return
+            _log(f"  Video mask: {len(flow_masks)} frames  |  dilation {mask_dilation}px")
+        else:
+            raw_mask = (
+                _mask_from_upload(mask_upload, size)
+                if mask_mode == "upload"
+                else _mask_from_editor(mask_editor, size)
+            )
+            if raw_mask is None:
+                _log("❌  Could not extract mask.")
+                yield *_state(),
+                return
 
-        tmp_dir  = tempfile.mkdtemp(prefix="propainter_")
-        mask_tmp = os.path.join(tmp_dir, "mask.png")
-        raw_mask.save(mask_tmp)
+            tmp_dir  = tempfile.mkdtemp(prefix="propainter_")
+            mask_tmp = os.path.join(tmp_dir, "mask.png")
+            raw_mask.save(mask_tmp)
 
-        flow_masks, masks_dilated = read_mask(
-            mask_tmp, video_length, size,
-            flow_mask_dilates=int(mask_dilation),
-            mask_dilates=int(mask_dilation),
-        )
-        _log(f"  Dilation: {mask_dilation}px  |  {len(flow_masks)} mask frames ready")
+            flow_masks, masks_dilated = read_mask(
+                mask_tmp, video_length, size,
+                flow_mask_dilates=int(mask_dilation),
+                mask_dilates=int(mask_dilation),
+            )
+            _log(f"  Dilation: {mask_dilation}px  |  {len(flow_masks)} mask frames ready")
     except Exception:
         _log(f"❌  Mask processing failed:\n{traceback.format_exc()}")
         yield *_state(),
@@ -585,7 +647,7 @@ def build_ui() -> gr.Blocks:
 
                 gr.Markdown("### Mask")
                 mask_mode = gr.Radio(
-                    choices=["upload", "paint"],
+                    choices=["upload", "paint", "video"],
                     value="upload",
                     label="Mask input mode",
                 )
@@ -603,6 +665,12 @@ def build_ui() -> gr.Blocks:
                     eraser=gr.Eraser(default_size=20),
                     type="numpy",
                     height=300,
+                    visible=False,
+                )
+
+                mask_video = gr.Video(
+                    label="Mask video  (white = inpaint, black = keep — MOV/MP4)",
+                    sources=["upload"],
                     visible=False,
                 )
 
@@ -679,17 +747,18 @@ def build_ui() -> gr.Blocks:
             outputs=[mask_editor],
         )
 
-        # Switch between upload / paint inputs
+        # Switch between upload / paint / video mask inputs
         def _on_mask_mode(mode):
             return (
                 gr.update(visible=mode == "upload"),
                 gr.update(visible=mode == "paint"),
+                gr.update(visible=mode == "video"),
             )
 
         mask_mode.change(
             fn=_on_mask_mode,
             inputs=[mask_mode],
-            outputs=[mask_upload, mask_editor],
+            outputs=[mask_upload, mask_editor, mask_video],
         )
 
         # Show / hide TurboQuant bits slider
@@ -706,7 +775,7 @@ def build_ui() -> gr.Blocks:
         run_btn.click(
             fn=run_inpainting,
             inputs=[
-                video_input, mask_mode, mask_upload, mask_editor,
+                video_input, mask_mode, mask_upload, mask_editor, mask_video,
                 neighbor_length, ref_stride, subvideo_length,
                 fp16_toggle, tq_toggle, tq_bits, mask_dilation,
             ],
