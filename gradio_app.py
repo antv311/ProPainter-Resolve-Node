@@ -201,7 +201,7 @@ def _mask_from_upload(path: str | None, size: tuple) -> Image.Image | None:
 
 def _write_comparison(left_frames, right_frames, fps: float, out_path: str):
     """Write side-by-side (masked | inpainted) MP4."""
-    with imageio.get_writer(out_path, fps=fps, quality=7) as w:
+    with imageio.get_writer(out_path, fps=fps, quality=7, macro_block_size=1) as w:
         for l_f, r_f in zip(left_frames, right_frames):
             l = np.array(l_f) if not isinstance(l_f, np.ndarray) else l_f
             r = np.array(r_f) if not isinstance(r_f, np.ndarray) else r_f
@@ -541,11 +541,18 @@ def run_inpainting(
     comp_out   = [cv2.resize(f, out_size) for f in comp_frames]
     masked_out = [cv2.resize(f, out_size) for f in masked_for_save]
 
-    imageio.mimwrite(out_mp4, comp_out, fps=fps, quality=7)
-    _write_comparison(masked_out, comp_out, fps, cmp_mp4)
+    _log(f"  Writing inpainted:  {len(comp_out)} frames  "
+         f"shape={comp_out[0].shape}  fps={fps:.2f}")
+    imageio.mimwrite(out_mp4, comp_out, fps=fps, quality=7, macro_block_size=1)
+    out_mb = os.path.getsize(out_mp4) / 1e6 if os.path.exists(out_mp4) else 0.0
+    _log(f"  → {out_mp4}  ({out_mb:.2f} MB, exists={os.path.exists(out_mp4)})")
 
-    _log(f"  → {out_mp4}")
-    _log(f"  → {cmp_mp4}")
+    _log(f"  Writing comparison: {len(masked_out)} frames  "
+         f"shape={masked_out[0].shape}  fps={fps:.2f}")
+    _write_comparison(masked_out, comp_out, fps, cmp_mp4)
+    cmp_mb = os.path.getsize(cmp_mp4) / 1e6 if os.path.exists(cmp_mp4) else 0.0
+    _log(f"  → {cmp_mp4}  ({cmp_mb:.2f} MB, exists={os.path.exists(cmp_mp4)})")
+
     progress(1.0, desc="Done")
 
     yield *_final(out_mp4, cmp_mp4),
