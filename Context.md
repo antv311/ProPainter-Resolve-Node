@@ -1,5 +1,5 @@
 # CLAUDE.md — ProPainter-Resolve-Node
-Last updated: 2026-03-30
+Last updated: 2026-04-01
 
 ---
 
@@ -24,8 +24,8 @@ Build a fully local, automated VFX pipeline inside DaVinci Resolve Studio replac
 
 ## Phase Structure
 
-### Phase 1 — Get the AI Guts Working (CURRENT)
-Get the inference stack fully modernized and running on Python 3.14 + CUDA 13.1 + WAFT + TurboQuant. Validate everything through a **Gradio test interface** — not the Resolve node. The node comes later.
+### Phase 1 — Get the AI Guts Working ✅ COMPLETE
+Get the inference stack fully modernized and running on Python 3.14 + CUDA 13.1 + WAFT + TurboQuant. Validated through a Tkinter benchmarking harness. The Resolve node comes later.
 
 Deliverables:
 - Python 3.14 venv with source-built PyTorch (CUDA 13.1) ✅ Wheel built & cached
@@ -34,8 +34,29 @@ Deliverables:
 - xformers source build ✅ Wheel built & cached
 - WAFT replacing RAFT as the optical flow backbone ✅ Code complete (waft-downstream.pth checkpoint still needed)
 - TurboQuant integrated into ProPainter's spatiotemporal attention layers ✅ Complete (cosine sim 0.9675)
-- Gradio UI for end-to-end testing of inpainting on real client footage types ✅ Complete
-- All dead training/eval code removed from the repo ⬜ Pending
+- tvdcn wired into recurrent_flow_completion.py ✅ Complete
+- Gradio UI ✅ Built, then replaced — see tkinter_app.py
+- tkinter_app.py ✅ Three-tab benchmarking harness (Run / Benchmark / Compare stub)
+- All dead training/eval code removed from the repo ⬜ Pending (datasets/, train.py, configs/, scripts/, web-demos/ staged for deletion)
+
+### Phase 1.1 — Per-Clip Mask Trimming for Partial Frame Exits (Separate Node)
+
+**Problem:** Subject exits frame mid-clip (e.g. frames 3–6). The mask needs to be active only on the frames where the subject is absent or partially absent — not the full clip. ProPainter handles the reconstruction natively via temporal propagation from surrounding frames.
+
+**Goal:** A separate Resolve node (or pre-processing step) that:
+- Takes a frame range input (e.g. "frames 3–6")
+- Activates the inpaint mask only on those frames
+- Passes the trimmed per-frame mask sequence to ProPainter
+
+**Why separate node:** The main ProPainter node operates on a single static or animated mask. Partial-exit clips need a mask that turns on and off at specific timecodes — cleaner as a dedicated node than complicating the main node's mask logic.
+
+**Status:** ⬜ Not started — revisit after Phase 2 node architecture is established.
+
+### Phase 1.5 — Side-by-Side Video Comparison (Tab 3 stub)
+
+**Goal:** Populate the Compare tab in `tkinter_app.py` with a true side-by-side video player for A/B review of results from different run labels.
+
+**Status:** ⬜ Stub only ("Side-by-side video comparison — Phase 1.5" label). Full implementation deferred until Phase 1 inference quality is validated.
 
 ### Phase 2 — DaVinci Resolve Node
 OpenFX C++ plugin talking to persistent Python inference servers over Unix sockets. Models stay resident in memory between frames — per-frame reload is a non-starter for performance. This phase starts only after Phase 1 is stable and validated.
@@ -112,9 +133,9 @@ Key packages in venvbp:
 | safetensors | 0.7.0 |
 | transformers | 5.4.0 |
 | huggingface-hub | 1.8.0 |
-| gradio | 6.10.0 |
 | imageio | 2.37.3 |
 | imageio-ffmpeg | 0.6.0 |
+| matplotlib | (for tkinter benchmark chart) |
 
 Full frozen requirements saved at: `C:\Users\tony\venvs\wheels\requirements-venvbp-frozen.txt`
 
@@ -133,7 +154,7 @@ pip install --no-deps C:\Users\tony\venvs\wheels\opencv_python-4.13.0.92-cp314-c
 pip install --no-deps C:\Users\tony\venvs\wheels\xformers-0.0.35+6e9337ce.d20260329-py39-none-win_amd64.whl
 
 # Then install remaining deps normally
-pip install triton-windows scipy pillow safetensors transformers huggingface-hub gradio imageio imageio-ffmpeg
+pip install triton-windows scipy pillow safetensors transformers huggingface-hub imageio imageio-ffmpeg matplotlib
 ```
 
 **CRITICAL:** Always use `--no-deps` when installing our custom wheels. Never use `--force-reinstall` on xformers — it will pull torch 2.11.0+cpu from PyPI and nuke the custom wheel.
@@ -284,11 +305,15 @@ Location: `weights/` folder in repo root
 
 **Repo:** `https://github.com/princeton-vl/WAFT` — use `waftv2` branch
 
-**Integration work required:**
-ProPainter currently loads RAFT via `model/modules/flow_comp_raft.py`. We replace this with
-WAFT's inference path. WAFT is architecturally cleaner to integrate than SEA-RAFT because it
-dropped the cost volume entirely — fewer moving parts in the adapter. WAFT returns flow only
-(no uncertainty output unlike SEA-RAFT).
+**Integration:** `model/modules/flow_comp_waft.py` wraps WAFT's `ViTWarpV8` model.
+Uses a scoped `sys.modules` swap to isolate WAFT's bare-name `model.*` imports from
+ProPainter's own `model` package — evicts, imports, then restores in a `finally` block.
+
+**Multi-model note (future tkinter update):**
+`raft-things.pth` and `sea-raft-M.pth` are both on disk. A future update to `tkinter_app.py`
+will add a flow backbone selector (WAFT / RAFT / SEA-RAFT) to enable A/B comparison of
+flow quality vs VRAM usage. WAFT is the default and target; RAFT and SEA-RAFT are kept for
+regression testing only.
 
 ---
 
@@ -300,33 +325,58 @@ keep textures consistent over time. The sparse attention workaround in the origi
 literally throws away context tokens to survive VRAM. This is a KV memory problem.
 
 TurboQuant (Google Research, ICLR 2026) compresses KV vectors to 3–4 bits with provably
-near-zero accuracy loss and zero calibration required. Community PyTorch implementations
-already exist.
+near-zero accuracy loss and zero calibration required.
 
-**The adaptation:** Community implementations wrap HuggingFace's `past_key_values` interface
-for autoregressive LLMs. ProPainter's attention is bidirectional (past AND future frames).
-We hook directly into `model/modules/sparse_transformer.py` and compress the cross-frame
-keys and values before they hit `F.scaled_dot_product_attention`.
+**Implementation:** `model/modules/turboquant_kv.py` — Lloyd-Max quantization (precomputed
+Gaussian codebooks at 2/3/4 bits) + QJL residual correction for keys. Hooked into
+`SparseWindowAttention` via `use_turboquant` flag. Off by default — zero behavior change.
+
+**Smoke test:** `python model/modules/turboquant_kv.py` — cosine similarity ≥ 0.9675 at 3-bit.
 
 **Expected benefit:**
 - Stop dropping tokens — retain full temporal context instead of sparse subset
 - Wider reference windows (50–100 frames vs current sparse handful)
 - More VRAM headroom for higher resolution processing
 
-**Implementation approach:** Add as an optional flag — enable/disable for A/B quality testing.
-Don't bake it in unconditionally until we've validated output quality on real footage.
+---
 
-**Community code:**
-- `pip install turboquant` (PyPI, Apache 2.0)
-- `github.com/tonbistudio/turboquant-pytorch` — PyTorch from-scratch, 99.5% attention fidelity at 3-bit
-- `github.com/OnlyTerp/turboquant` — reference implementation, pure PyTorch
-- Google's official code expected Q2 2026
+## Test Harness — tkinter_app.py
+
+Three-tab Tkinter benchmarking harness. No web server, no temp files, direct file paths.
+
+**Tab 1 — Run:**
+- Video path + Mask path (Browse buttons, direct filesystem paths)
+- Run label (e.g. "baseline", "tq-3bit") — output files never overwrite each other
+- Settings: neighbor_length, ref_stride, subvideo_length, mask dilation (Spinbox)
+- FP16 toggle, TurboQuant toggle + bits Spinbox (enabled when TQ on)
+- Run button (inference in background thread, UI stays live)
+- Open results/ button
+- Scrolled log widget + ttk.Progressbar
+
+**Tab 2 — Benchmark:**
+- matplotlib line chart (FigureCanvasTkAgg) — X: elapsed time, Y: VRAM allocated (GB)
+- One line per run label, colored, with legend
+- Summary table: run label | total time | peak VRAM | avg time/chunk
+- Export CSV button
+- VRAM sampled every 500ms via root.after + after each chunk completes
+- Chart and table refresh after every run
+
+**Tab 3 — Compare (stub):**
+- "Side-by-side video comparison — Phase 1.5"
+- Full implementation deferred to Phase 1.5
+
+**Output naming:** `results/{stem}_{run_label}_inpainted.mp4` and
+`results/{stem}_{run_label}_comparison.mp4`
+
+**Mask auto-detection:** extension-based — video exts → per-frame mask video
+(`_masks_from_video`), otherwise → static image mask (`read_mask`).
 
 ---
 
-## Dead Code to Remove (Do First)
+## Dead Code to Remove (Pending)
 
-Before any functional changes, strip everything not needed for inference:
+The following are staged as deleted in git (showing `D` in `git status`) but not yet
+committed as a cleanup commit:
 
 ```
 datasets/
@@ -335,51 +385,46 @@ configs/
 scripts/compute_flow.py
 scripts/evaluate_flow_completion.py
 scripts/evaluate_propainter.py
-weights/i3d_rgb_imagenet.pt
-web_demos/          (or gradio_app.py / app.py — whatever the demo is called)
-environment.yaml    (targets Python 3.8, replace with our own setup docs)
-assets/             (GIFs and screenshots for README)
+web-demos/
+assets/          (GIFs and screenshots for README)
 ```
 
-Keep: `model/`, `core/`, `utils/`, `inputs/` (test data), `inference_propainter.py`, `requirements.txt` (will be rewritten)
+Keep: `model/`, `core/`, `utils/`, `inputs/` (test data), `inference_propainter.py`,
+`tkinter_app.py`, `CLAUDE.md`, `Context.md`
 
 ---
 
-## ProPainter Modernization Changes (Phase 1)
+## ProPainter Modernization Changes (Phase 1) — Status
 
-Six code changes needed after dead code removal:
-
-**1. requirements.txt** — Full rewrite targeting Python 3.14, PyTorch 2.12+, CUDA 13.1
-
-**2. torchvision `read_video` replacement** — Replace `torchvision.io.read_video` with
-`cv2.VideoCapture`. This is the ONLY torchvision usage in the codebase. Eliminates
-the torchvision dependency entirely.
-
-**3. `get_device()` in `model/misc.py`** — Old pattern using deprecated torch device
-detection. Replace with modern `torch.cuda.is_available()` pattern.
-
-**4. scipy mask memory chunking** — `scipy.ndimage.binary_dilation` on the full mask stack
-is the primary OOM source on 8GB VRAM. Chunk it. Process N frames at a time, reassemble.
-This is the most important fix for the 3080.
-
-**5. WAFT adapter** — Replace `model/modules/flow_comp_raft.py` with WAFT inference path.
-
-**6. TurboQuant hook** — Wrap attention in `model/modules/sparse_transformer.py` with
-optional TurboQuant compression.
+| Change | Status |
+|--------|--------|
+| requirements.txt rewrite | ✅ |
+| torchvision read_video → cv2 | ✅ |
+| get_device() modernized | ✅ |
+| tvdcn wired into recurrent_flow_completion.py | ✅ |
+| WAFT adapter (flow_comp_waft.py) | ✅ Code complete, checkpoint pending |
+| TurboQuant hook (sparse_transformer.py + turboquant_kv.py) | ✅ |
+| Tkinter benchmarking harness | ✅ |
 
 ---
 
-## Gradio Test Interface (Phase 1 Validation)
+## Git Log (recent)
 
-Replace the existing Gradio demo (which we're deleting) with a purpose-built test UI that
-matches our actual use cases:
+```
+44a992f gradio: copy-first upload + manual H.264 convert button
+4e1400b gradio: verbose ffmpeg logging + ffprobe H.264 skip check
+3313d19 gradio: write transcode output to RESULTS_DIR; force CAP_FFMPEG
+60f5c1a gradio: ffmpeg transcode on video upload for browser compatibility
+8f8b1a1 gradio: format=mp4 on video input + upload diagnostics log
+a70a839 gradio: add video mask input mode for per-frame MOV/MP4 masks
+3f3581e gradio: log video write diagnostics + fix macro_block_size
+5f5093c Remove torchvision from core/utils.py
+647834e Fix WAFT model package collision with ProPainter's model package
+5c5ef5b Phase 1: Add Gradio test UI — Phase 1 quality gate
+```
 
-- **Input:** Video file + mask (drawn or uploaded)
-- **Controls:** Neighbor length, ref stride, subvideo length, fp16 toggle, TurboQuant on/off, VRAM usage display
-- **Output:** Inpainted video + side-by-side comparison
-- **Logging:** Frame processing time, peak VRAM per chunk
-
-This is our quality gate before Phase 2.
+Note: gradio_app.py was subsequently deleted and replaced by tkinter_app.py (not yet
+committed as a standalone commit — pending with dead code cleanup).
 
 ---
 
@@ -393,11 +438,18 @@ This is our quality gate before Phase 2.
 
 ---
 
-## Longer-Term Hardware
+## Longer-Term Hardware & Upgrade Notes
 
-Tesla P40 (24GB VRAM) being considered — when it arrives, swap to `sea-raft-L.pth` and the
-largest WAFT variant. The SEA-RAFT M model (`sea-raft-M.pth`) is already downloaded and
-ready for reference.
+**Tesla P40 (24GB VRAM)** being considered — when it arrives:
+- Swap flow backbone to `sea-raft-L` (not yet downloaded) or largest WAFT variant
+- `sea-raft-M.pth` already on disk for reference
+
+### DiffuEraser — P40 upgrade target
+- **What:** Diffusion-based video inpainting; uses ProPainter as a structured prior/initialization, then applies a video diffusion U-Net on top.
+- **Why relevant:** Explicitly outperforms ProPainter on temporal consistency benchmarks (DAVIS, YouTube-VOS). The diffusion pass smooths temporal flickering that ProPainter's propagation+transformer approach leaves behind.
+- **Weights:** ~30 GB (SD-based video diffusion backbone). Not viable on RTX 3080 8 GB.
+- **Action:** Revisit when P40 arrives. DiffuEraser would replace or wrap the current `InpaintGenerator` inference path.
+- **Reference:** "DiffuEraser: Diffusion Model for Video Inpainting"
 
 ---
 
@@ -406,16 +458,18 @@ ready for reference.
 - **Cleanup before modernization** — dead code removal precedes functional changes
 - **Source builds are a deliberate commitment** — "drag these guys into the 2026s kicking and screaming"
 - **Privacy is non-negotiable** — no cloud, no exceptions, DoD wipes after every job
-- **Gradio gates the node** — don't touch Phase 2 until Phase 1 is proven on real footage
+- **Tkinter harness gates the node** — don't touch Phase 2 until Phase 1 is proven on real footage
 - **TurboQuant is optional until validated** — A/B test quality before committing
 - **Wheel cache pattern** — build once in `venvbp`, cache to `venvs\wheels\`, install from cache for every new node
 - **torchvision is skipped** — only usage was `read_video`, replaced with cv2
 - **--no-deps on custom wheels** — always install torch/opencv/xformers with --no-deps to prevent PyPI clobbering
 - **Never --force-reinstall xformers** — pip will pull torch 2.11.0+cpu and nuke the custom wheel
+- **Direct file paths** — no web server, no temp files, no Gradio; tkinter uses askopenfilename throughout
 
 ---
 
 ## Context Persistence
 
-This `CLAUDE.md` should be committed to the repo root. Claude Code sessions load it
-automatically. Update it when decisions change or new phases begin.
+This `Context.md` should be committed to the repo root. Claude Code sessions load it
+automatically via `CLAUDE.md` (which can symlink or duplicate key sections). Update it
+when decisions change or new phases begin.
