@@ -629,7 +629,8 @@ _FFMPEG_FALLBACK = r'C:\tools\ffmpeg\bin\ffmpeg.exe'
 
 def _ffmpeg_transcode(input_path: str):
     """
-    Transcode input_path to H.264 / yuv420p MP4 for browser compatibility.
+    Probe input_path with ffprobe; skip transcode if already H.264.
+    Otherwise transcode to H.264 / yuv420p MP4 for browser compatibility.
     Returns (output_path, success, log_lines).
     output_path is the H.264 path on success, or input_path on failure.
     """
@@ -641,6 +642,28 @@ def _ffmpeg_transcode(input_path: str):
         return input_path, False, lines
 
     lines.append(f"ffmpeg: {ffmpeg}")
+
+    # ── ffprobe: skip transcode if already H.264 ─────────────────────────────
+    ffprobe = os.path.join(os.path.dirname(ffmpeg), 'ffprobe.exe') if os.name == 'nt' else \
+              os.path.join(os.path.dirname(ffmpeg), 'ffprobe')
+    if not os.path.isfile(ffprobe):
+        ffprobe = shutil.which('ffprobe') or ffprobe
+    try:
+        probe = subprocess.run(
+            [ffprobe, '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=codec_name',
+             '-of', 'default=noprint_wrappers=1', input_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        for probe_line in probe.stdout.splitlines():
+            lines.append(f"ffprobe: {probe_line.strip()}")
+        if 'codec_name=h264' in probe.stdout:
+            lines.append("Already H.264 — skipping transcode")
+            return input_path, True, lines
+    except Exception as exc:
+        lines.append(f"ffprobe error (continuing to transcode): {exc}")
+
+    # ── transcode ─────────────────────────────────────────────────────────────
     os.makedirs(RESULTS_DIR, exist_ok=True)
     output_path = os.path.join(RESULTS_DIR, Path(input_path).stem + "_h264.mp4")
     cmd = [
@@ -649,18 +672,25 @@ def _ffmpeg_transcode(input_path: str):
         '-pix_fmt', 'yuv420p', '-c:a', 'copy',
         output_path,
     ]
+    lines.append(f"cmd: {' '.join(cmd)}")
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode == 0:
+        proc = subprocess.Popen(
+            cmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            text=True, encoding='utf-8', errors='replace',
+        )
+        for stderr_line in proc.stderr:
+            lines.append(stderr_line.rstrip())
+        proc.wait(timeout=300)
+        lines.append(f"ffmpeg exit: {proc.returncode}")
+        if proc.returncode == 0:
             out_mb = os.path.getsize(output_path) / 1e6 if os.path.exists(output_path) else 0.0
             lines.append(f"Transcode OK → {output_path}  ({out_mb:.2f} MB)")
             return output_path, True, lines
         else:
-            lines.append(f"ffmpeg exit {result.returncode}")
-            # last 800 chars of stderr is usually enough to see what went wrong
-            lines.append(result.stderr[-800:].strip() if result.stderr else "(no stderr)")
+            lines.append("⚠ ffmpeg failed — using original file")
             return input_path, False, lines
     except subprocess.TimeoutExpired:
+        proc.kill()
         lines.append("ffmpeg timed out after 300 s")
         return input_path, False, lines
     except Exception as exc:
