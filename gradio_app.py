@@ -627,6 +627,27 @@ def run_inpainting(
 _FFMPEG_FALLBACK = r'C:\tools\ffmpeg\bin\ffmpeg.exe'
 
 
+def _ffprobe_codec(input_path: str, ffmpeg_exe: str) -> str | None:
+    """Return the video codec name (e.g. 'h264', 'hevc') or None on failure."""
+    ffprobe = os.path.join(os.path.dirname(ffmpeg_exe), 'ffprobe.exe') if os.name == 'nt' else \
+              os.path.join(os.path.dirname(ffmpeg_exe), 'ffprobe')
+    if not os.path.isfile(ffprobe):
+        ffprobe = shutil.which('ffprobe') or ffprobe
+    try:
+        result = subprocess.run(
+            [ffprobe, '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=codec_name',
+             '-of', 'default=noprint_wrappers=1', input_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith('codec_name='):
+                return line.split('=', 1)[1].strip()
+    except Exception:
+        pass
+    return None
+
+
 def _ffmpeg_transcode(input_path: str):
     """
     Probe input_path with ffprobe; skip transcode if already H.264.
@@ -644,24 +665,11 @@ def _ffmpeg_transcode(input_path: str):
     lines.append(f"ffmpeg: {ffmpeg}")
 
     # ── ffprobe: skip transcode if already H.264 ─────────────────────────────
-    ffprobe = os.path.join(os.path.dirname(ffmpeg), 'ffprobe.exe') if os.name == 'nt' else \
-              os.path.join(os.path.dirname(ffmpeg), 'ffprobe')
-    if not os.path.isfile(ffprobe):
-        ffprobe = shutil.which('ffprobe') or ffprobe
-    try:
-        probe = subprocess.run(
-            [ffprobe, '-v', 'error', '-select_streams', 'v:0',
-             '-show_entries', 'stream=codec_name',
-             '-of', 'default=noprint_wrappers=1', input_path],
-            capture_output=True, text=True, timeout=30,
-        )
-        for probe_line in probe.stdout.splitlines():
-            lines.append(f"ffprobe: {probe_line.strip()}")
-        if 'codec_name=h264' in probe.stdout:
-            lines.append("Already H.264 — skipping transcode")
-            return input_path, True, lines
-    except Exception as exc:
-        lines.append(f"ffprobe error (continuing to transcode): {exc}")
+    codec = _ffprobe_codec(input_path, ffmpeg)
+    lines.append(f"ffprobe: codec_name={codec}")
+    if codec == 'h264':
+        lines.append("Already H.264 — skipping transcode")
+        return input_path, True, lines
 
     # ── transcode ─────────────────────────────────────────────────────────────
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -723,6 +731,15 @@ def build_ui() -> gr.Blocks:
                     format="mp4",
                     height=280,
                 )
+
+                with gr.Row():
+                    codec_info_md = gr.Markdown(visible=False, scale=3)
+                    convert_btn   = gr.Button(
+                        "Convert to H.264 for preview",
+                        visible=False,
+                        scale=1,
+                        variant="secondary",
+                    )
 
                 gr.Markdown("### Mask")
                 mask_mode = gr.Radio(
@@ -818,18 +835,30 @@ def build_ui() -> gr.Blocks:
 
         # ── event wiring ──────────────────────────────────────────────────────
 
-        # When video is uploaded: log diagnostics, transcode, populate paint editor
-        def _on_video_upload(video_path):
-            if video_path is None:
-                return gr.update(), "", gr.update()
+        # ── State: working file paths (what inference actually reads) ─────────
+        working_path      = gr.State(value=None)
+        mask_working_path = gr.State(value=None)
 
-            lines = [f"Path:  {video_path}"]
+        # When video is uploaded: copy to RESULTS_DIR, probe, update state+UI
+        def _on_video_upload(video_path):
+            """
+            Returns: (mask_editor, upload_log, codec_row, convert_btn, working_path)
+            Never touches video_path after copying — avoids Gradio temp-file locks.
+            """
+            if video_path is None:
+                return gr.update(), "", gr.update(visible=False), gr.update(visible=False), None
+
+            os.makedirs(RESULTS_DIR, exist_ok=True)
+            dest = os.path.join(RESULTS_DIR, Path(video_path).name)
+            shutil.copy2(video_path, dest)
+
+            lines = [f"Original: {video_path}", f"Copied:   {dest}"]
             try:
-                lines.append(f"Size:  {os.path.getsize(video_path) / 1e6:.2f} MB")
+                lines.append(f"Size:  {os.path.getsize(dest) / 1e6:.2f} MB")
             except OSError as e:
                 lines.append(f"Size:  ERROR — {e}")
 
-            cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
+            cap = cv2.VideoCapture(dest, cv2.CAP_FFMPEG)
             lines.append(f"cv2.isOpened():  {cap.isOpened()}")
             if cap.isOpened():
                 lines.append(
@@ -840,43 +869,71 @@ def build_ui() -> gr.Blocks:
                 )
             cap.release()
 
-            h264_path, ok, tx_lines = _ffmpeg_transcode(video_path)
-            lines.extend(tx_lines)
-            if not ok:
-                lines.append("⚠ Using original file — browser preview may not work")
+            # Probe codec on the copy
+            ffmpeg = shutil.which('ffmpeg') or (_FFMPEG_FALLBACK if os.path.isfile(_FFMPEG_FALLBACK) else None)
+            codec = _ffprobe_codec(dest, ffmpeg) if ffmpeg else None
+            lines.append(f"Codec: {codec or 'unknown'}")
+
+            if codec == 'h264':
+                codec_md  = gr.update(value="✓ H.264 — no conversion needed", visible=True)
+                conv_btn  = gr.update(visible=False)
+            else:
+                codec_md  = gr.update(value=f"⚠ Codec: **{codec or 'unknown'}** — convert for browser preview", visible=True)
+                conv_btn  = gr.update(visible=True)
 
             editor_update = gr.update()
-            frame = _first_frame_numpy(h264_path)
+            frame = _first_frame_numpy(dest)
             if frame is not None:
                 editor_update = gr.update(
                     value={"background": frame, "layers": [], "composite": frame}
                 )
 
-            return editor_update, "\n".join(lines), gr.update(value=h264_path)
+            return editor_update, "\n".join(lines), codec_md, conv_btn, dest
 
         video_input.change(
             fn=_on_video_upload,
             inputs=[video_input],
-            outputs=[mask_editor, upload_log, video_input],
+            outputs=[mask_editor, upload_log, codec_info_md, convert_btn, working_path],
         )
 
-        # When mask video is uploaded: transcode and log
+        # Convert button: transcode the working copy, update state + video preview
+        def _on_convert_click(current_path):
+            if current_path is None:
+                return "No file loaded.", gr.update(), gr.update(visible=True), None
+            h264_path, ok, tx_lines = _ffmpeg_transcode(current_path)
+            log_text = "\n".join(tx_lines)
+            if ok:
+                return log_text, gr.update(value=h264_path), gr.update(visible=False), h264_path
+            else:
+                return log_text + "\n⚠ Conversion failed — using original", gr.update(), gr.update(visible=True), current_path
+
+        convert_btn.click(
+            fn=_on_convert_click,
+            inputs=[working_path],
+            outputs=[upload_log, video_input, convert_btn, working_path],
+        )
+
+        # When mask video is uploaded: copy to RESULTS_DIR, probe, auto-transcode
         def _on_mask_video_upload(video_path):
             if video_path is None:
-                return "", gr.update()
+                return "", gr.update(), None
 
-            lines = [f"Mask video: {video_path}"]
-            h264_path, ok, tx_lines = _ffmpeg_transcode(video_path)
+            os.makedirs(RESULTS_DIR, exist_ok=True)
+            dest = os.path.join(RESULTS_DIR, "mask_" + Path(video_path).name)
+            shutil.copy2(video_path, dest)
+
+            lines = [f"Mask copied: {dest}"]
+            h264_path, ok, tx_lines = _ffmpeg_transcode(dest)
             lines.extend(tx_lines)
             if not ok:
                 lines.append("⚠ Using original file")
 
-            return "\n".join(lines), gr.update(value=h264_path)
+            return "\n".join(lines), gr.update(value=h264_path), h264_path
 
         mask_video.change(
             fn=_on_mask_video_upload,
             inputs=[mask_video],
-            outputs=[upload_log, mask_video],
+            outputs=[upload_log, mask_video, mask_working_path],
         )
 
         # Switch between upload / paint / video mask inputs
@@ -907,7 +964,7 @@ def build_ui() -> gr.Blocks:
         run_btn.click(
             fn=run_inpainting,
             inputs=[
-                video_input, mask_mode, mask_upload, mask_editor, mask_video,
+                working_path, mask_mode, mask_upload, mask_editor, mask_working_path,
                 neighbor_length, ref_stride, subvideo_length,
                 fp16_toggle, tq_toggle, tq_bits, mask_dilation,
             ],
