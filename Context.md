@@ -288,8 +288,7 @@ Location: `weights/` folder in repo root
 | `recurrent_flow_completion.pth` | ✅ Downloaded | Same release |
 | `raft-things.pth` | ✅ Downloaded | Same release (selectable via backbone combobox) |
 | `sea-raft-M.pth` | ✅ Downloaded | HuggingFace: MemorySlices/Tartan-C-T-TSKH-spring540x960-M |
-| `waft-downstream.pth` | ✅ Downloaded | Google Drive — WAFT repo readme, "downstream applications" checkpoint. **Shared by WAFT-twins and WAFT-dav2** — same flow checkpoint, different feature extractor |
-| `depth_anything_v2_vits.pth` | ⬜ Not downloaded | **Required for WAFT-dav2 only.** HuggingFace: depth-anything/Depth-Anything-V2-Small → save to `depth-anything-ckpts/depth_anything_v2_vits.pth` |
+| `waft-downstream.pth` | ✅ Downloaded | Google Drive — WAFT repo readme, "downstream applications" checkpoint. WAFT-dav2 (waft-a1) only — DA2 weights are baked in; no twins downstream checkpoint exists |
 | `i3d_rgb_imagenet.pt` | 🗑️ DELETE | Eval only, not needed |
 
 ---
@@ -310,11 +309,14 @@ Location: `weights/` folder in repo root
 Uses a scoped `sys.modules` swap to isolate WAFT's bare-name `model.*` imports from
 ProPainter's own `model` package — evicts, imports, then restores in a `finally` block.
 
+**Confirmed downstream target:** WAFT-dav2 (waft-a1 / `ViTWarpV8`). Checkpoint inspection
+confirmed `waft-downstream.pth` is a waft-a1/dav2 checkpoint — DA2 weights are baked directly
+into it and load from the HuggingFace cache (`~/.cache/huggingface`) on first instantiation.
+No twins downstream checkpoint exists; WAFT-twins path in `flow_comp_waft.py` is dead code
+retained until one is released.
+
 **Flow backbone selector (implemented):**
-`tkinter_app.py` has a backbone combobox: WAFT-twins (default), WAFT-dav2, RAFT, SEA-RAFT.
-`WAFT_bi` in `flow_comp_waft.py` dispatches to the appropriate model class.
-`waft-downstream.pth` is shared across both WAFT variants; WAFT-dav2 additionally requires
-`depth-anything-ckpts/depth_anything_v2_vits.pth` (not yet downloaded).
+`tkinter_app.py` has a backbone combobox: WAFT-dav2 (default), WAFT-twins, RAFT, SEA-RAFT.
 RAFT and SEA-RAFT are available for regression A/B comparison of flow quality vs VRAM usage.
 
 ---
@@ -350,10 +352,12 @@ Three-tab Tkinter benchmarking harness. No web server, no temp files, direct fil
 - Video path + Mask path (Browse buttons, direct filesystem paths)
 - Run label (e.g. "baseline", "tq-3bit") — output files never overwrite each other
 - Settings: neighbor_length, ref_stride, subvideo_length, mask dilation (Spinbox)
-- FP16 toggle, TurboQuant toggle + bits Spinbox (enabled when TQ on)
+- FP16 (ProPainter) toggle, FP16 WAFT toggle, TurboQuant toggle + bits Spinbox (enabled when TQ on)
+- Flow backbone combobox: WAFT-dav2 (default), WAFT-twins, RAFT, SEA-RAFT
 - Run button (inference in background thread, UI stays live)
 - Open results/ button
-- Scrolled log widget + ttk.Progressbar
+- Scrolled log widget + ttk.Progressbar + live VRAM bar (allocated / total GB, updates every 500ms)
+- Log emits: settings dump, device info (GPU name, CUDA version, PyTorch version, total VRAM), WAFT CPU offload status, per-chunk peak VRAM
 
 **Tab 2 — Benchmark:**
 - matplotlib line chart (FigureCanvasTkAgg) — X: elapsed time, Y: VRAM allocated (GB)
@@ -375,58 +379,32 @@ Three-tab Tkinter benchmarking harness. No web server, no temp files, direct fil
 
 ---
 
-## Dead Code to Remove (Pending)
-
-The following are staged as deleted in git (showing `D` in `git status`) but not yet
-committed as a cleanup commit:
-
-```
-datasets/
-train.py
-configs/
-scripts/compute_flow.py
-scripts/evaluate_flow_completion.py
-scripts/evaluate_propainter.py
-web-demos/
-assets/          (GIFs and screenshots for README)
-```
-
-Keep: `model/`, `core/`, `utils/`, `inputs/` (test data), `inference_propainter.py`,
-`tkinter_app.py`, `CLAUDE.md`, `Context.md`
-
----
-
 ## ProPainter Modernization Changes (Phase 1) — Status
 
 | Change | Status |
 |--------|--------|
 | requirements.txt rewrite | ✅ |
 | torchvision read_video → cv2 | ✅ |
-| get_device() modernized | ✅ |
+| get_device() modernized (removed cudnn.is_available() guard) | ✅ |
 | tvdcn wired into recurrent_flow_completion.py | ✅ |
-| WAFT adapter (flow_comp_waft.py) | ✅ Code complete, checkpoint pending |
+| WAFT adapter (flow_comp_waft.py) | ✅ Complete |
 | TurboQuant hook (sparse_transformer.py + turboquant_kv.py) | ✅ |
 | Tkinter benchmarking harness | ✅ |
+| Runtime bug fixes (settings passthrough, flow cache eviction, tensor cleanup) | ✅ |
+| VRAM optimizations (inference_mode, WAFT CPU offload, 4K tiling, cudnn benchmark) | ✅ |
 
 ---
 
 ## Git Log (recent)
 
 ```
+(pending commit) runtime bugs + VRAM optimizations + device info logging
+(pending commit) Context.md / CLAUDE.md updates — WAFT confirmed dav2, backbone combobox, FP16 WAFT
+c829fa7 cleanup: remove dead training/eval code and unused weights and fixed waft
+80244d3 Update WAFT submodule: remove torchvision from inference path
+590d30a Phase 1 complete: tkinter harness, merged Context.md, CLAUDE.md
 44a992f gradio: copy-first upload + manual H.264 convert button
-4e1400b gradio: verbose ffmpeg logging + ffprobe H.264 skip check
-3313d19 gradio: write transcode output to RESULTS_DIR; force CAP_FFMPEG
-60f5c1a gradio: ffmpeg transcode on video upload for browser compatibility
-8f8b1a1 gradio: format=mp4 on video input + upload diagnostics log
-a70a839 gradio: add video mask input mode for per-frame MOV/MP4 masks
-3f3581e gradio: log video write diagnostics + fix macro_block_size
-5f5093c Remove torchvision from core/utils.py
-647834e Fix WAFT model package collision with ProPainter's model package
-5c5ef5b Phase 1: Add Gradio test UI — Phase 1 quality gate
 ```
-
-Note: gradio_app.py was subsequently deleted and replaced by tkinter_app.py (not yet
-committed as a standalone commit — pending with dead code cleanup).
 
 ---
 
