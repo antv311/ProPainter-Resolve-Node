@@ -50,9 +50,11 @@ class WAFT_bi(nn.Module):
     where frames_t is [B, T, C, H, W] in [-1, 1].
     """
 
-    def __init__(self, model_path: str, device='cuda', backbone: str = 'WAFT-twins'):
+    def __init__(self, model_path: str, device='cuda', backbone: str = 'WAFT-dav2',
+                 fp16: bool = False):
         super().__init__()
         self.backbone = backbone
+        self.fp16 = fp16
 
         if backbone == 'WAFT-dav2':
             self._init_waft_dav2(model_path, device)
@@ -65,6 +67,9 @@ class WAFT_bi(nn.Module):
         else:
             raise ValueError(f"Unknown backbone '{backbone}'. "
                              "Choose from: WAFT-dav2, WAFT-twins, RAFT, SEA-RAFT")
+
+        if fp16 and backbone in ('WAFT-dav2', 'WAFT-twins'):
+            self._waft = self._waft.half()
 
         self.eval()
 
@@ -158,7 +163,59 @@ class WAFT_bi(nn.Module):
             p.requires_grad = False
         self._searaft = searaft
 
+    # ── tiled flow helper ─────────────────────────────────────────────────────
+
+    def _tile_flow(self, img1, img2):
+        """
+        Split a pair of high-res frames into a 2×2 grid of overlapping tiles,
+        compute flow on each tile, and stitch back with linear blending.
+
+        img1, img2: [B, C, H, W] in [0, 255], already cast to model dtype.
+        Returns: flow [B, 2, H, W] float32.
+        """
+        overlap = 64
+        B, C, H, W = img1.shape
+        th, tw = H // 2, W // 2  # tile size = half resolution
+
+        # tile top-left corners (with overlap extension)
+        tile_coords = [
+            (0,          0         ),
+            (0,          W - tw    ),
+            (H - th,     0         ),
+            (H - th,     W - tw    ),
+        ]
+
+        flow_acc    = torch.zeros(B, 2, H, W, device=img1.device, dtype=torch.float32)
+        weight_acc  = torch.zeros(B, 1, H, W, device=img1.device, dtype=torch.float32)
+
+        for (r, c_) in tile_coords:
+            r2, c2 = r + th, c_ + tw
+            t1 = img1[:, :, r:r2, c_:c2]
+            t2 = img2[:, :, r:r2, c_:c2]
+            f  = self._waft(t1, t2)['flow'][-1].float()  # [B, 2, th, tw]
+
+            # linear blend weight — ramps down in overlap regions
+            wy = torch.ones(th, device=img1.device, dtype=torch.float32)
+            wx = torch.ones(tw, device=img1.device, dtype=torch.float32)
+            if r > 0:
+                wy[:overlap] = torch.linspace(0, 1, overlap, device=img1.device)
+            if r2 < H:
+                wy[-overlap:] = torch.linspace(1, 0, overlap, device=img1.device)
+            if c_ > 0:
+                wx[:overlap] = torch.linspace(0, 1, overlap, device=img1.device)
+            if c2 < W:
+                wx[-overlap:] = torch.linspace(1, 0, overlap, device=img1.device)
+            w = (wy.unsqueeze(1) * wx.unsqueeze(0)).unsqueeze(0).unsqueeze(0)  # [1,1,th,tw]
+
+            flow_acc[:, :, r:r2, c_:c2]   += f * w
+            weight_acc[:, :, r:r2, c_:c2] += w
+
+        return flow_acc / weight_acc.clamp(min=1e-6)
+
     # ── forward ───────────────────────────────────────────────────────────────
+
+    _TILE_H = 1080
+    _TILE_W = 1920
 
     def forward(self, gt_local_frames, iters=20):
         """
@@ -167,18 +224,25 @@ class WAFT_bi(nn.Module):
         """
         with torch.no_grad():
             b, l_t, c, h, w = gt_local_frames.size()
+            use_tiling = (h > self._TILE_H or w > self._TILE_W)
 
             if self.backbone == 'WAFT-dav2':
                 # ViTWarpV8.forward() expects [0, 255] and handles padding internally.
                 # Output dict: {'flow': [pred_iter0, ..., pred_iterN], 'info': [...]}
                 # Take ['flow'][-1] — the final refined estimate.
                 frames_255 = ((gt_local_frames + 1) * 127.5).clamp(0, 255)
+                if self.fp16:
+                    frames_255 = frames_255.half()
                 forward_flows, backward_flows = [], []
                 for i in range(l_t - 1):
                     img1 = frames_255[:, i]
                     img2 = frames_255[:, i + 1]
-                    forward_flows.append(self._waft(img1, img2)['flow'][-1])
-                    backward_flows.append(self._waft(img2, img1)['flow'][-1])
+                    if use_tiling:
+                        forward_flows.append(self._tile_flow(img1, img2))
+                        backward_flows.append(self._tile_flow(img2, img1))
+                    else:
+                        forward_flows.append(self._waft(img1, img2)['flow'][-1].float())
+                        backward_flows.append(self._waft(img2, img1)['flow'][-1].float())
                 return (
                     torch.stack(forward_flows,  dim=1),
                     torch.stack(backward_flows, dim=1),

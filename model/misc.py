@@ -59,7 +59,7 @@ def gpu_is_available():
     if IS_MPS_AWARE:
         if torch.backends.mps.is_available():
             return True
-    return True if torch.cuda.is_available() and torch.backends.cudnn.is_available() else False
+    return torch.cuda.is_available()
 
 def get_device(gpu_id=None):
     if gpu_id is None:
@@ -72,7 +72,7 @@ def get_device(gpu_id=None):
     if IS_MPS_AWARE:
         if torch.backends.mps.is_available():
             return torch.device('mps'+gpu_str)
-    return torch.device('cuda'+gpu_str if torch.cuda.is_available() and torch.backends.cudnn.is_available() else 'cpu')
+    return torch.device('cuda'+gpu_str if torch.cuda.is_available() else 'cpu')
 
 
 def set_random_seed(seed):

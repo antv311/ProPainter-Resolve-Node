@@ -96,7 +96,7 @@ _DAV2_DOWNLOAD_URL = (
 )
 
 
-def load_models(log_fn=None, flow_backbone: str = "WAFT-dav2"):
+def load_models(log_fn=None, flow_backbone: str = "WAFT-dav2", fp16_waft: bool = False):
     global _models
     device = _get_device()
 
@@ -107,10 +107,13 @@ def load_models(log_fn=None, flow_backbone: str = "WAFT-dav2"):
     errors = []
 
     with _model_lock:
-        # Evict flow model if backbone has changed since last load
-        if _models.get("flow_backbone") != flow_backbone:
+        # Evict flow model if backbone or fp16_waft setting has changed since last load
+        if (_models.get("flow_backbone") != flow_backbone or
+                _models.get("flow_fp16") != fp16_waft):
             _models.pop("flow", None)
             _models.pop("flow_backbone", None)
+            _models.pop("flow_fp16", None)
+            torch.cuda.empty_cache()
 
         if "flow" not in _models:
             try:
@@ -131,8 +134,9 @@ def load_models(log_fn=None, flow_backbone: str = "WAFT-dav2"):
                         url=os.path.join(PRETRAIN_URL, "waft-downstream.pth"),
                         model_dir=WEIGHTS_DIR, progress=False, file_name=None,
                     )
-                    _models["flow"] = WAFT_bi(ckpt, device, backbone=flow_backbone)
-                    _log(f"  ✓ {flow_backbone}  [{_vram_str()}]")
+                    _models["flow"] = WAFT_bi(ckpt, device, backbone=flow_backbone,
+                                              fp16=fp16_waft)
+                    _log(f"  ✓ {flow_backbone}{'  [FP16]' if fp16_waft else ''}  [{_vram_str()}]")
 
                 elif flow_backbone == "RAFT":
                     raft_ckpt = os.path.join(WEIGHTS_DIR, "raft-things.pth")
@@ -140,8 +144,9 @@ def load_models(log_fn=None, flow_backbone: str = "WAFT-dav2"):
                         _log(f"  ✗ RAFT requires weights/raft-things.pth")
                         _log("    Download: https://drive.google.com/file/d/1MqDajR89k-xLV0HIrmJ0k-n8ZpG6_suM")
                         raise FileNotFoundError(f"Missing checkpoint: {raft_ckpt}")
-                    _models["flow"] = WAFT_bi(raft_ckpt, device, backbone="RAFT")
-                    _log(f"  ✓ RAFT  [{_vram_str()}]")
+                    _models["flow"] = WAFT_bi(raft_ckpt, device, backbone="RAFT",
+                                              fp16=fp16_waft)
+                    _log(f"  ✓ RAFT{'  [FP16]' if fp16_waft else ''}  [{_vram_str()}]")
 
                 elif flow_backbone == "SEA-RAFT":
                     searaft_ckpt = os.path.join(WEIGHTS_DIR, "sea-raft-M.pth")
@@ -152,10 +157,12 @@ def load_models(log_fn=None, flow_backbone: str = "WAFT-dav2"):
                     ckpt_size = os.path.getsize(searaft_ckpt)
                     if ckpt_size <= 100:
                         _log(f"  ⚠ sea-raft-M.pth is only {ckpt_size} bytes — likely a bad download")
-                    _models["flow"] = WAFT_bi(searaft_ckpt, device, backbone="SEA-RAFT")
-                    _log(f"  ✓ SEA-RAFT  [{_vram_str()}]")
+                    _models["flow"] = WAFT_bi(searaft_ckpt, device, backbone="SEA-RAFT",
+                                              fp16=fp16_waft)
+                    _log(f"  ✓ SEA-RAFT{'  [FP16]' if fp16_waft else ''}  [{_vram_str()}]")
 
                 _models["flow_backbone"] = flow_backbone
+                _models["flow_fp16"] = fp16_waft
 
             except Exception as exc:
                 _log(f"  ✗ {flow_backbone} flow failed — {exc}")
@@ -286,6 +293,7 @@ def run_inpainting(
     tq_bits: int,
     mask_dilation: int,
     flow_backbone: str,
+    fp16_waft: bool,
     log_fn,         # callable(str)
     progress_fn,    # callable(float, str)
     vram_sample_fn, # callable(float, float) — (elapsed_s, vram_gb)
@@ -301,6 +309,11 @@ def run_inpainting(
 
     def _prog(val, desc=""):
         progress_fn(val, desc)
+
+    _log(f"  Settings: neighbor={neighbor_length} ref_stride={ref_stride} "
+         f"subvideo={subvideo_length} dilation={mask_dilation} "
+         f"backbone={flow_backbone} fp16={fp16} fp16_waft={fp16_waft} "
+         f"tq={use_tq} tq_bits={tq_bits}")
 
     if not video_path or not os.path.isfile(video_path):
         _log("❌  Video file not found.")
@@ -320,7 +333,7 @@ def run_inpainting(
     # ── load models ───────────────────────────────────────────────────────────
     _log("── Loading models ─────────────────────────────────────")
     _prog(0.0, "Loading models…")
-    load_models(log_fn=_log, flow_backbone=flow_backbone)
+    load_models(log_fn=_log, flow_backbone=flow_backbone, fp16_waft=fp16_waft)
 
     if "flow_complete" not in _models or "inpaint" not in _models:
         _log("❌  Critical models failed — cannot continue.")
@@ -332,6 +345,20 @@ def run_inpainting(
 
     device   = _get_device()
     use_half = bool(fp16) and device.type == "cuda"
+
+    if device.type == 'cuda':
+        torch.backends.cudnn.benchmark = True
+
+    # ── device info ───────────────────────────────────────────────────────────
+    _log("── Compute device ─────────────────────────────────────")
+    if device.type == 'cuda':
+        _log(f"  Device: {torch.cuda.get_device_name(0)}")
+        _log(f"  CUDA: {torch.version.cuda}  |  PyTorch: {torch.__version__}")
+        total_vram = torch.cuda.get_device_properties(0).total_memory / 1e9
+        _log(f"  VRAM total: {total_vram:.1f} GB")
+    else:
+        _log("  ⚠ Device: CPU — CUDA not detected")
+        _log("  Check CUDA DLL PATH — see Context.md Build Environment section")
 
     # ── read video ────────────────────────────────────────────────────────────
     _log("── Reading video ──────────────────────────────────────")
@@ -441,6 +468,9 @@ def run_inpainting(
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
+        if flow_model is not None:
+            flow_model.to(device)
+
         frames_t = to_tensors()(c_frames).unsqueeze(0) * 2 - 1
         fmasks_t = to_tensors()(c_fmasks).unsqueeze(0)
         mdil_t   = to_tensors()(c_mdil).unsqueeze(0)
@@ -450,7 +480,7 @@ def run_inpainting(
 
         chunk_t0 = time.perf_counter()
 
-        with torch.no_grad():
+        with torch.inference_mode():
             if   frames_t.size(-1) <= 640:  scl = 12
             elif frames_t.size(-1) <= 720:  scl = 8
             elif frames_t.size(-1) <= 1280: scl = 4
@@ -477,6 +507,11 @@ def run_inpainting(
                     torch.zeros(B, T - 1, 2, H, W, device=device),
                     torch.zeros(B, T - 1, 2, H, W, device=device),
                 )
+
+            if flow_model is not None:
+                flow_model.cpu()
+                torch.cuda.empty_cache()
+                _log(f"  WAFT offloaded to CPU  [{_vram_str()}]")
 
             if use_half:
                 frames_t    = frames_t.half()
@@ -517,13 +552,14 @@ def run_inpainting(
                 pred_flows_bi[1][:, nb_ids[:-1]],
             )
 
-            with torch.no_grad():
+            with torch.inference_mode():
                 l_t  = len(nb_ids)
                 pred = inpaint_model(sel_imgs, sel_flows, sel_masks, sel_upd_mask, l_t)
                 pred = pred.view(-1, 3, h, w)
                 pred = (pred + 1) / 2
                 pred_np   = pred.cpu().permute(0, 2, 3, 1).numpy() * 255
                 bin_masks = mdil_t[0, nb_ids].cpu().permute(0, 2, 3, 1).numpy().astype(np.uint8)
+                del pred
 
                 for local_i, chunk_i in enumerate(nb_ids):
                     global_i = chunk_start + chunk_i
@@ -544,6 +580,7 @@ def run_inpainting(
                         comp_frames[global_i]  += img_out.astype(np.float32) * weight
                         comp_weights[global_i] += weight
 
+            del sel_imgs, sel_masks, sel_upd_mask, sel_flows, pred_np, bin_masks
             torch.cuda.empty_cache()
 
         elapsed   = time.perf_counter() - chunk_t0
@@ -623,9 +660,11 @@ class App(tk.Tk):
         self._bench_data: list[dict] = []
         # Currently-accumulating VRAM samples for the active run
         self._active_samples: list[tuple[float, float]] = []
+        self._vram_after_id = None
 
         self._build_ui()
         self._schedule_vram()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -713,8 +752,14 @@ class App(tk.Tk):
         row += 1
 
         self._fp16_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(p, text="FP16  (half precision)",
+        ttk.Checkbutton(p, text="FP16  (ProPainter half precision)",
                         variable=self._fp16_var).grid(
+            row=row, column=0, columnspan=3, sticky="w")
+        row += 1
+
+        self._fp16_waft_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(p, text="FP16  (WAFT flow model)",
+                        variable=self._fp16_waft_var).grid(
             row=row, column=0, columnspan=3, sticky="w")
         row += 1
 
@@ -783,6 +828,16 @@ class App(tk.Tk):
         ttk.Progressbar(p, variable=self._progress_var,
                         maximum=1.0).grid(
             row=3, column=0, sticky="ew", pady=(2, 0))
+
+        vram_frame = ttk.Frame(p)
+        vram_frame.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        vram_frame.columnconfigure(1, weight=1)
+        ttk.Label(vram_frame, text="VRAM").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self._vram_bar = ttk.Progressbar(vram_frame, orient="horizontal",
+                                         mode="determinate", maximum=100)
+        self._vram_bar.grid(row=0, column=1, sticky="ew")
+        self._vram_label = ttk.Label(vram_frame, text="— / — GB", width=22, anchor="e")
+        self._vram_label.grid(row=0, column=2, sticky="e", padx=(6, 0))
 
     # ── Tab 2: Benchmark ──────────────────────────────────────────────────────
 
@@ -896,6 +951,7 @@ class App(tk.Tk):
             tq_bits         = self._bits_var.get(),
             mask_dilation   = self._dil_var.get(),
             flow_backbone   = self._backbone_var.get(),
+            fp16_waft       = self._fp16_waft_var.get(),
             log_fn          = self._thread_log,
             progress_fn     = self._thread_progress,
             vram_sample_fn  = self._thread_vram_sample,
@@ -1034,7 +1090,23 @@ class App(tk.Tk):
             # approximate elapsed from sample count × 0.5s
             elapsed = len(self._active_samples) * 0.5
             self._active_samples.append((elapsed, _vram_alloc_gb()))
-        self.after(500, self._schedule_vram)
+        # Update VRAM bar
+        if torch.cuda.is_available():
+            try:
+                allocated = torch.cuda.memory_allocated() / 1024**3
+                total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                pct = (allocated / total) * 100
+                self._vram_bar['value'] = pct
+                self._vram_label.config(
+                    text=f"{allocated:.1f} / {total:.1f} GB  ({pct:.0f}%)")
+            except Exception:
+                pass
+        self._vram_after_id = self.after(500, self._schedule_vram)
+
+    def _on_close(self):
+        if self._vram_after_id is not None:
+            self.after_cancel(self._vram_after_id)
+        self.destroy()
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
