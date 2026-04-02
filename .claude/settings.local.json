@@ -5,7 +5,19 @@
       "Bash(c:/Users/tony/venvs/propainter/Scripts/python.exe -c \"import torch; print\\(torch.__version__\\)\")",
       "Read(//c/Users/tony/venvs/venvbp/Lib/site-packages/**)",
       "Bash(c:/Users/tony/venvs/venvbp/Scripts/python.exe -c \"import torch; print\\(torch.__version__\\); print\\(torch.cuda.is_available\\(\\)\\)\")",
-      "Bash(c:/Users/tony/venvs/venvbp/Scripts/python.exe model/modules/turboquant_kv.py)"
+      "Bash(c:/Users/tony/venvs/venvbp/Scripts/python.exe model/modules/turboquant_kv.py)",
+      "Read(//c/Users/tony/venvs//**)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(c:/Users/tony/venvs/venvbp/Scripts/pip show:*)",
+      "Bash(c:/Users/tony/venvs/venvbp/Scripts/pip list:*)",
+      "Bash(c:/Users/tony/venvs/venvbp/Scripts/pip install:*)",
+      "Bash(c:/Users/tony/venvs/venvbp/Scripts/python.exe -c \"import tvdcn.ops; print\\(tvdcn.__version__\\)\")",
+      "Bash(c:/Users/tony/venvs/venvbp/Scripts/python.exe -c \":*)",
+      "Bash(c:/Users/tony/venvs/venvbp/Scripts/python.exe -c \"import gradio as gr; print\\(gr.__version__\\); print\\(dir\\(gr\\)\\)\")",
+      "Bash(c:/Users/tony/venvs/venvbp/Scripts/python.exe -c \"import gradio as gr; import inspect; print\\(inspect.signature\\(gr.Brush.__init__\\)\\)\")",
+      "Bash(c:/Users/tony/venvs/venvbp/Scripts/python.exe -c \"import gradio as gr; import inspect; sig = inspect.signature\\(gr.ImageEditor.__init__\\); print\\([p for p in sig.parameters if p not in \\(''self'',''kwargs''\\)]\\)\")",
+      "Bash(python -c \":*)"
     ]
   }
 }

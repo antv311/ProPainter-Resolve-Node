@@ -32,7 +32,7 @@ Deliverables:
 - torchvision ✅ ELIMINATED — deform_conv2d replaced with tvdcn 1.1.0; read_video replaced with cv2
 - opencv-python source build ✅ Wheel built & cached
 - xformers source build ✅ Wheel built & cached
-- WAFT replacing RAFT as the optical flow backbone ✅ Code complete (waft-downstream.pth checkpoint still needed)
+- WAFT replacing RAFT as the optical flow backbone ✅ Complete (waft-downstream.pth downloaded; backbone combobox in tkinter_app.py)
 - TurboQuant integrated into ProPainter's spatiotemporal attention layers ✅ Complete (cosine sim 0.9675)
 - tvdcn wired into recurrent_flow_completion.py ✅ Complete
 - Gradio UI ✅ Built, then replaced — see tkinter_app.py
@@ -286,9 +286,10 @@ Location: `weights/` folder in repo root
 |------|--------|--------|
 | `ProPainter.pth` | ✅ Downloaded | github.com/sczhou/ProPainter/releases/tag/v0.1.0 |
 | `recurrent_flow_completion.pth` | ✅ Downloaded | Same release |
-| `raft-things.pth` | ✅ Downloaded | Same release (kept for reference, WAFT replaces it) |
+| `raft-things.pth` | ✅ Downloaded | Same release (selectable via backbone combobox) |
 | `sea-raft-M.pth` | ✅ Downloaded | HuggingFace: MemorySlices/Tartan-C-T-TSKH-spring540x960-M |
-| `waft-downstream.pth` | ⬜ Pending | Google Drive — WAFT repo readme, "downstream applications" checkpoint |
+| `waft-downstream.pth` | ✅ Downloaded | Google Drive — WAFT repo readme, "downstream applications" checkpoint. **Shared by WAFT-twins and WAFT-dav2** — same flow checkpoint, different feature extractor |
+| `depth_anything_v2_vits.pth` | ⬜ Not downloaded | **Required for WAFT-dav2 only.** HuggingFace: depth-anything/Depth-Anything-V2-Small → save to `depth-anything-ckpts/depth_anything_v2_vits.pth` |
 | `i3d_rgb_imagenet.pt` | 🗑️ DELETE | Eval only, not needed |
 
 ---
@@ -309,11 +310,12 @@ Location: `weights/` folder in repo root
 Uses a scoped `sys.modules` swap to isolate WAFT's bare-name `model.*` imports from
 ProPainter's own `model` package — evicts, imports, then restores in a `finally` block.
 
-**Multi-model note (future tkinter update):**
-`raft-things.pth` and `sea-raft-M.pth` are both on disk. A future update to `tkinter_app.py`
-will add a flow backbone selector (WAFT / RAFT / SEA-RAFT) to enable A/B comparison of
-flow quality vs VRAM usage. WAFT is the default and target; RAFT and SEA-RAFT are kept for
-regression testing only.
+**Flow backbone selector (implemented):**
+`tkinter_app.py` has a backbone combobox: WAFT-twins (default), WAFT-dav2, RAFT, SEA-RAFT.
+`WAFT_bi` in `flow_comp_waft.py` dispatches to the appropriate model class.
+`waft-downstream.pth` is shared across both WAFT variants; WAFT-dav2 additionally requires
+`depth-anything-ckpts/depth_anything_v2_vits.pth` (not yet downloaded).
+RAFT and SEA-RAFT are available for regression A/B comparison of flow quality vs VRAM usage.
 
 ---
 

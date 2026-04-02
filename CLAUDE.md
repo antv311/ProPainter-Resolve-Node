@@ -44,3 +44,7 @@ DaVinci Resolve OpenFX node (C++ plugin) that calls into the Python inference st
 - **Weights**: ~30 GB (SD-based video diffusion backbone). Not viable on RTX 3080 8 GB.
 - **Revisit when**: P40 (24 GB) arrives. DiffuEraser would replace or wrap the current `InpaintGenerator` inference path.
 - **Reference**: "DiffuEraser: Diffusion Model for Video Inpainting" — integrates ProPainter optical flow + propagation as a structured prior before the diffusion U-Net.
+
+**pip install requires --no-deps** — pip install timm without --no-deps will 
+pull torch from PyPI and nuke the custom wheel. Always: 
+pip install --no-deps timm

@@ -83,7 +83,20 @@ def _vram_str() -> str:
     return f"Alloc {alloc:.2f} GB  |  Peak {peak:.2f} GB  |  Total {total:.1f} GB"
 
 
-def load_models(log_fn=None):
+_BACKBONE_CKPTS = {
+    "WAFT-twins": ("waft-downstream.pth", None),   # (filename_in_weights, extra_ckpt_or_None)
+    "WAFT-dav2":  ("waft-downstream.pth", "depth-anything-ckpts/depth_anything_v2_vits.pth"),
+    "RAFT":       (None, "weights/raft-things.pth"),
+    "SEA-RAFT":   (None, "weights/sea-raft-M.pth"),
+}
+
+_DAV2_DOWNLOAD_URL = (
+    "https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/"
+    "depth_anything_v2_vits.pth"
+)
+
+
+def load_models(log_fn=None, flow_backbone: str = "WAFT-dav2"):
     global _models
     device = _get_device()
 
@@ -94,17 +107,58 @@ def load_models(log_fn=None):
     errors = []
 
     with _model_lock:
+        # Evict flow model if backbone has changed since last load
+        if _models.get("flow_backbone") != flow_backbone:
+            _models.pop("flow", None)
+            _models.pop("flow_backbone", None)
+
         if "flow" not in _models:
             try:
-                _log("  Loading WAFT flow model…")
-                ckpt = load_file_from_url(
-                    url=os.path.join(PRETRAIN_URL, "waft-downstream.pth"),
-                    model_dir=WEIGHTS_DIR, progress=False, file_name=None,
-                )
-                _models["flow"] = WAFT_bi(ckpt, device)
-                _log(f"  ✓ WAFT  [{_vram_str()}]")
+                _log(f"  Loading flow model  [{flow_backbone}]…")
+
+                if flow_backbone in ("WAFT-twins", "WAFT-dav2"):
+                    if flow_backbone == "WAFT-dav2":
+                        da_ckpt = "depth-anything-ckpts/depth_anything_v2_vits.pth"
+                        if not os.path.isfile(da_ckpt):
+                            _log(f"  ✗ WAFT-dav2 requires depth_anything_v2_vits.pth")
+                            _log(f"    Download: {_DAV2_DOWNLOAD_URL}")
+                            _log(f"    Save to: {da_ckpt}")
+                            raise FileNotFoundError(
+                                f"Missing checkpoint: {da_ckpt}\n"
+                                f"Download from {_DAV2_DOWNLOAD_URL}"
+                            )
+                    ckpt = load_file_from_url(
+                        url=os.path.join(PRETRAIN_URL, "waft-downstream.pth"),
+                        model_dir=WEIGHTS_DIR, progress=False, file_name=None,
+                    )
+                    _models["flow"] = WAFT_bi(ckpt, device, backbone=flow_backbone)
+                    _log(f"  ✓ {flow_backbone}  [{_vram_str()}]")
+
+                elif flow_backbone == "RAFT":
+                    raft_ckpt = os.path.join(WEIGHTS_DIR, "raft-things.pth")
+                    if not os.path.isfile(raft_ckpt):
+                        _log(f"  ✗ RAFT requires weights/raft-things.pth")
+                        _log("    Download: https://drive.google.com/file/d/1MqDajR89k-xLV0HIrmJ0k-n8ZpG6_suM")
+                        raise FileNotFoundError(f"Missing checkpoint: {raft_ckpt}")
+                    _models["flow"] = WAFT_bi(raft_ckpt, device, backbone="RAFT")
+                    _log(f"  ✓ RAFT  [{_vram_str()}]")
+
+                elif flow_backbone == "SEA-RAFT":
+                    searaft_ckpt = os.path.join(WEIGHTS_DIR, "sea-raft-M.pth")
+                    if not os.path.isfile(searaft_ckpt):
+                        _log(f"  ✗ SEA-RAFT requires weights/sea-raft-M.pth")
+                        _log("    Clone: https://github.com/princeton-vl/SEA-RAFT")
+                        raise FileNotFoundError(f"Missing checkpoint: {searaft_ckpt}")
+                    ckpt_size = os.path.getsize(searaft_ckpt)
+                    if ckpt_size <= 100:
+                        _log(f"  ⚠ sea-raft-M.pth is only {ckpt_size} bytes — likely a bad download")
+                    _models["flow"] = WAFT_bi(searaft_ckpt, device, backbone="SEA-RAFT")
+                    _log(f"  ✓ SEA-RAFT  [{_vram_str()}]")
+
+                _models["flow_backbone"] = flow_backbone
+
             except Exception as exc:
-                _log(f"  ✗ WAFT failed — {exc}")
+                _log(f"  ✗ {flow_backbone} flow failed — {exc}")
                 _log("    (zero flow fallback; quality degraded)")
                 errors.append(("flow", str(exc)))
 
@@ -231,6 +285,7 @@ def run_inpainting(
     use_tq: bool,
     tq_bits: int,
     mask_dilation: int,
+    flow_backbone: str,
     log_fn,         # callable(str)
     progress_fn,    # callable(float, str)
     vram_sample_fn, # callable(float, float) — (elapsed_s, vram_gb)
@@ -265,7 +320,7 @@ def run_inpainting(
     # ── load models ───────────────────────────────────────────────────────────
     _log("── Loading models ─────────────────────────────────────")
     _prog(0.0, "Loading models…")
-    load_models(log_fn=_log)
+    load_models(log_fn=_log, flow_backbone=flow_backbone)
 
     if "flow_complete" not in _models or "inpaint" not in _models:
         _log("❌  Critical models failed — cannot continue.")
@@ -681,6 +736,19 @@ class App(tk.Tk):
             row=row, column=0, columnspan=3, sticky="ew", pady=8)
         row += 1
 
+        ttk.Label(p, text="Flow backbone:").grid(row=row, column=0, sticky="w", pady=2)
+        self._backbone_var = tk.StringVar(value="WAFT-dav2")
+        self._backbone_combo = ttk.Combobox(
+            p, textvariable=self._backbone_var, state="readonly", width=14,
+            values=["WAFT-twins", "WAFT-dav2", "RAFT", "SEA-RAFT"],
+        )
+        self._backbone_combo.grid(row=row, column=1, columnspan=2, sticky="w", padx=(4, 0), pady=2)
+        row += 1
+
+        ttk.Separator(p, orient="horizontal").grid(
+            row=row, column=0, columnspan=3, sticky="ew", pady=8)
+        row += 1
+
         btn_frame = ttk.Frame(p)
         btn_frame.grid(row=row, column=0, columnspan=3, sticky="ew")
         btn_frame.columnconfigure(0, weight=1)
@@ -827,6 +895,7 @@ class App(tk.Tk):
             use_tq          = self._tq_var.get(),
             tq_bits         = self._bits_var.get(),
             mask_dilation   = self._dil_var.get(),
+            flow_backbone   = self._backbone_var.get(),
             log_fn          = self._thread_log,
             progress_fn     = self._thread_progress,
             vram_sample_fn  = self._thread_vram_sample,
