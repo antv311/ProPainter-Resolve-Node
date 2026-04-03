@@ -349,15 +349,22 @@ Gaussian codebooks at 2/3/4 bits) + QJL residual correction for keys. Hooked int
 Three-tab Tkinter benchmarking harness. No web server, no temp files, direct file paths.
 
 **Tab 1 — Run:**
-- Video path + Mask path (Browse buttons, direct filesystem paths)
-- Run label (e.g. "baseline", "tq-3bit") — output files never overwrite each other
-- Settings: neighbor_length, ref_stride, subvideo_length, mask dilation (Spinbox)
-- FP16 (ProPainter) toggle, FP16 WAFT toggle, TurboQuant toggle + bits Spinbox (enabled when TQ on)
+- **Mode combobox** (top): Video Inpainting | Video Outpainting | Resolution Expansion
+  - Switches between mode-specific settings sections dynamically (grid_remove/grid)
+- Video path (all modes) + Run label
+- **Video Inpainting** settings: Mask path (image or video), Mask dilation (px)
+- **Video Outpainting** settings: Scale H, Scale W (float spinboxes; `extrapolation()` generates canvas + masks automatically)
+- **Resolution Expansion** settings: Resize ratio, explicit Width + Height (0 = auto); full-frame mask forces ProPainter to regenerate detail via temporal propagation
+- Shared: Neighbor length, Reference stride, Number of chunks (auto-sets subvideo length), Subvideo length
+- FP16 (ProPainter) toggle, FP16 WAFT toggle, TurboQuant toggle + bits Spinbox
 - Flow backbone combobox: WAFT-dav2 (default), WAFT-twins, RAFT, SEA-RAFT
+- RAFT iterations spinbox (default 20; replaces all hardcoded iters=20 in run_inpainting)
+- Save FPS entry (blank = use source FPS; overrides output video fps)
+- Save frames checkbox (exports PNG sequence to results/{stem}_{label}_frames/)
 - Run button (inference in background thread, UI stays live)
 - Open results/ button
 - Scrolled log widget + ttk.Progressbar + live VRAM bar (allocated / total GB, updates every 500ms)
-- Log emits: settings dump, device info (GPU name, CUDA version, PyTorch version, total VRAM), WAFT CPU offload status, per-chunk peak VRAM
+- Log emits: mode + settings dump, device info (GPU name, CUDA version, PyTorch version, total VRAM), WAFT CPU offload status, per-chunk peak VRAM
 
 **Tab 2 — Benchmark:**
 - matplotlib line chart (FigureCanvasTkAgg) — X: elapsed time, Y: VRAM allocated (GB)
