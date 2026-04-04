@@ -210,6 +210,9 @@ class WAFT_bi(nn.Module):
             flow_acc[:, :, r:r2, c_:c2]   += f * w
             weight_acc[:, :, r:r2, c_:c2] += w
 
+            del f, w, wy, wx
+            torch.cuda.empty_cache()
+
         return flow_acc / weight_acc.clamp(min=1e-6)
 
     # ── forward ───────────────────────────────────────────────────────────────
@@ -231,12 +234,13 @@ class WAFT_bi(nn.Module):
                 # Output dict: {'flow': [pred_iter0, ..., pred_iterN], 'info': [...]}
                 # Take ['flow'][-1] — the final refined estimate.
                 frames_255 = ((gt_local_frames + 1) * 127.5).clamp(0, 255)
-                if self.fp16:
-                    frames_255 = frames_255.half()
                 forward_flows, backward_flows = [], []
                 for i in range(l_t - 1):
                     img1 = frames_255[:, i]
                     img2 = frames_255[:, i + 1]
+                    if self.fp16:
+                        img1 = img1.half()
+                        img2 = img2.half()
                     if use_tiling:
                         forward_flows.append(self._tile_flow(img1, img2))
                         backward_flows.append(self._tile_flow(img2, img1))

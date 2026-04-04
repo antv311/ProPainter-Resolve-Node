@@ -324,6 +324,12 @@ def run_inpainting(
     def _prog(val, desc=""):
         progress_fn(val, desc)
 
+    def _vlog(label):
+        if torch.cuda.is_available():
+            alloc = torch.cuda.memory_allocated() / 1e9
+            resv  = torch.cuda.memory_reserved()  / 1e9
+            _log(f"    [VRAM] {label}: alloc={alloc:.2f}GB  reserved={resv:.2f}GB")
+
     _log(f"  Mode: {mode}  Settings: neighbor={neighbor_length} ref_stride={ref_stride} "
          f"subvideo={subvideo_length} dilation={mask_dilation} "
          f"backbone={flow_backbone} fp16={fp16} fp16_waft={fp16_waft} "
@@ -533,6 +539,7 @@ def run_inpainting(
 
             if flow_model is not None:
                 flow_model.to(device)
+                _vlog("WAFT→GPU")
 
             frames_t = to_tensors()(c_frames).unsqueeze(0) * 2 - 1
             fmasks_t = to_tensors()(c_fmasks).unsqueeze(0)
@@ -540,6 +547,7 @@ def run_inpainting(
             frames_t = frames_t.to(device)
             fmasks_t = fmasks_t.to(device)
             mdil_t   = mdil_t.to(device)
+            _vlog("chunk tensors→GPU")
 
             chunk_t0 = time.perf_counter()
 
@@ -559,6 +567,7 @@ def run_inpainting(
                             fwd_list.append(ff)
                             bwd_list.append(fb)
                             torch.cuda.empty_cache()
+                            _vlog(f"  WAFT sub {f}–{ef} done")
                         gt_flows_bi = (torch.cat(fwd_list, dim=1), torch.cat(bwd_list, dim=1))
                     else:
                         gt_flows_bi = flow_model(frames_t, iters=raft_iters)
@@ -575,6 +584,7 @@ def run_inpainting(
                     flow_model.cpu()
                     torch.cuda.empty_cache()
                     _log(f"  WAFT offloaded to CPU  [{_vram_str()}]")
+                    _vlog("WAFT→CPU offloaded")
 
                 if use_half:
                     frames_t    = frames_t.half()
@@ -585,6 +595,7 @@ def run_inpainting(
                 pred_flows_bi, _ = flow_complete.forward_bidirect_flow(gt_flows_bi, fmasks_t)
                 pred_flows_bi    = flow_complete.combine_flow(gt_flows_bi, pred_flows_bi, fmasks_t)
                 torch.cuda.empty_cache()
+                _vlog("flow_complete done")
 
                 masked_f = frames_t * (1 - mdil_t)
                 b, t, _, _, _ = mdil_t.size()
@@ -594,6 +605,7 @@ def run_inpainting(
                 upd_frames = frames_t * (1 - mdil_t) + prop_imgs.view(b, t, 3, h, w) * mdil_t
                 upd_masks  = upd_masks.view(b, t, 1, h, w)
                 torch.cuda.empty_cache()
+                _vlog("img_propagation done")
 
             neighbor_stride = int(neighbor_length) // 2
             ref_num = chunk_size // int(ref_stride) if chunk_len > chunk_size // 2 else -1
@@ -616,6 +628,7 @@ def run_inpainting(
                 )
 
                 with torch.inference_mode():
+                    _vlog(f"  inpaint f={f} pre-forward")
                     l_t  = len(nb_ids)
                     pred = inpaint_model(sel_imgs, sel_flows, sel_masks, sel_upd_mask, l_t)
                     pred = pred.view(-1, 3, h, w)
@@ -623,6 +636,7 @@ def run_inpainting(
                     pred_np   = pred.cpu().permute(0, 2, 3, 1).numpy() * 255
                     bin_masks = mdil_t[0, nb_ids].cpu().permute(0, 2, 3, 1).numpy().astype(np.uint8)
                     del pred
+                    _vlog(f"  inpaint f={f} post-del pred")
 
                     for local_i, chunk_i in enumerate(nb_ids):
                         global_i = chunk_start + chunk_i
@@ -645,6 +659,7 @@ def run_inpainting(
 
                 del sel_imgs, sel_masks, sel_upd_mask, sel_flows, pred_np, bin_masks
                 torch.cuda.empty_cache()
+                _vlog(f"  inpaint f={f} post-cleanup")
 
             elapsed   = time.perf_counter() - chunk_t0
             chunk_times.append(elapsed)
@@ -661,6 +676,13 @@ def run_inpainting(
             del frames_t, fmasks_t, mdil_t, gt_flows_bi, pred_flows_bi
             del masked_f, prop_imgs, upd_frames, upd_masks
             torch.cuda.empty_cache()
+            _vlog("chunk teardown complete")
+
+        # ── post-loop CUDA flush ─────────────────────────────────────────────
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        _log(f"  Post-loop VRAM: [{_vram_str()}]")
 
         # ── normalise blended frames ──────────────────────────────────────────
         for i in range(video_length):
@@ -686,11 +708,14 @@ def run_inpainting(
         except (ValueError, TypeError):
             pass
 
-        out_mp4    = os.path.join(RESULTS_DIR, f"{video_name}_{safe_label}_inpainted.mp4")
-        cmp_mp4    = os.path.join(RESULTS_DIR, f"{video_name}_{safe_label}_comparison.mp4")
+        out_mp4 = os.path.join(RESULTS_DIR, f"{video_name}_{safe_label}_inpainted.mp4")
+        cmp_mp4 = os.path.join(RESULTS_DIR, f"{video_name}_{safe_label}_comparison.mp4")
 
-        comp_out   = [cv2.resize(f, out_size) for f in comp_frames]
+        comp_out = [cv2.resize(f, out_size) for f in comp_frames]
+        del comp_frames  # free normalised float32 list before masked list is built
+
         masked_out = [cv2.resize(f, out_size) for f in masked_for_save]
+        del masked_for_save  # free masked frames before writing
 
         _log(f"  Writing {out_mp4}")
         imageio.mimwrite(out_mp4, comp_out, fps=out_fps, quality=7, macro_block_size=1)
@@ -702,14 +727,20 @@ def run_inpainting(
         _log(f"  ✓ inpainted  {out_mb:.2f} MB")
         _log(f"  ✓ comparison {cmp_mb:.2f} MB")
 
+        del comp_out, masked_out  # both videos written; free before PNG export
+
         # ── save PNG frame sequence ───────────────────────────────────────────
         if save_frames:
+            # Re-read comp_out from the written MP4 to avoid holding a second copy
+            comp_out_png = [cv2.resize(f, out_size) for f in
+                            [cv2.cvtColor(np.array(fr), cv2.COLOR_RGB2BGR)
+                             for fr in imageio.mimread(out_mp4)]]
             frames_dir = os.path.join(RESULTS_DIR, f"{video_name}_{safe_label}_frames")
             os.makedirs(frames_dir, exist_ok=True)
             _prog(0.98, "Writing PNG frames…")
-            for idx, frame in enumerate(comp_out):
-                frame_path = os.path.join(frames_dir, f"{idx:05d}.png")
-                cv2.imwrite(frame_path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            for idx, frame in enumerate(comp_out_png):
+                cv2.imwrite(os.path.join(frames_dir, f"{idx:05d}.png"), frame)
+            del comp_out_png
             _log(f"  ✓ frames → {frames_dir}/")
 
         _prog(1.0, "Done")

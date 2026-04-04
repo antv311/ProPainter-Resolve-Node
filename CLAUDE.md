@@ -26,6 +26,7 @@ WAFT/                       Git submodule — WAFT optical flow model (waftv2 br
 weights/                    Downloaded checkpoints (gitignored)
 results/                    Output videos — {stem}_{run_label}_inpainted.mp4
                             PNG sequences — {stem}_{run_label}_frames/ (when save_frames=True)
+                            Run logs — {stem}_{run_label}_{YYYYMMDD_HHMMSS}.log (always written)
 core/utils.py               to_tensors(), Stack, ToTorchFormatTensor (no torchvision)
 ```
 
@@ -45,6 +46,11 @@ core/utils.py               to_tensors(), Stack, ToTorchFormatTensor (no torchvi
 - **Dynamic UI**: `_build_run_left` uses three `ttk.Frame` objects at the same grid row; `_on_mode_changed` calls `grid_remove()`/`grid()` to swap the visible section without destroying widgets or losing state.
 - **Direct file paths throughout**: `tkinter_app.py` uses `askopenfilename`; no web server, no temp files, no Gradio.
 - **Output naming**: `{video_stem}_{run_label}_inpainted.mp4` — runs never overwrite each other, enabling A/B comparison. PNG sequences go to `{stem}_{label}_frames/` when save_frames is enabled.
+- **Persistent run log**: `results/{stem}_{run_label}_{YYYYMMDD_HHMMSS}.log` opened after `run_label` is sanitized. `_log_file = None` before the closure; the `if _log_file is not None` guard makes early-exit calls (video/mask not found) silently UI-only. `buffering=1` (line-buffered) flushes every call — prevents data loss on OOM. `try/finally` guarantees `_log_file.close()` regardless of whether the run succeeded or crashed.
+- **Post-loop CUDA flush**: after the chunk loop, `torch.cuda.empty_cache()` + `torch.cuda.synchronize()` runs before normalization. Followed by a `_log` VRAM snapshot. Ensures the allocator is clean before the write phase.
+- **Per-tile CUDA cleanup**: inside `WAFT_bi._tile_flow()`, each tile's intermediates (`f`, `w`, `wy`, `wx`) are `del`'d and `empty_cache()` called before the next tile. Prevents 4-tile peak accumulation on 4K frames.
+- **TurboQuant intermediate cleanup**: `compress_keys()` deletes `k_rot`, `k_recon`, `residual`, `residual_norm`, `proj` before returning; `compress_values()` deletes `v_rot`. No `empty_cache()` needed — these are small float32 temporaries; `del` is sufficient for prompt GC.
+- **CPU RAM write-phase sequencing**: frame lists freed in strict order to avoid four full-video lists coexisting. `del comp_frames` immediately after `comp_out` is built; `del masked_for_save` after `masked_out` is built; `del comp_out, masked_out` after both MP4s are written. PNG export re-reads from the written MP4 via `imageio.mimread` rather than holding a third list in parallel.
 
 ## Claude working notes — things to check before editing
 - **Always run `Select-String -Path tkinter_app.py -Pattern "fix_raft|RAFT_bi"` (or Grep) before touching flow code** — there must be zero matches. All flow goes through `_models["flow"]`.
@@ -54,6 +60,10 @@ core/utils.py               to_tensors(), Stack, ToTorchFormatTensor (no torchvi
 - **Three mode-specific frames share the same grid row** (`MODE_FRAME_ROW`). Use `grid_remove()`/`grid()` not `pack_forget()`/`pack()` — they were laid out with grid.
 - **`run_inpainting` param order**: `video_path, mask_path, mode, run_label, neighbor_length, ref_stride, subvideo_length, fp16, use_tq, tq_bits, mask_dilation, flow_backbone, fp16_waft, num_chunks, scale_h, scale_w, resize_ratio, res_width, res_height, save_fps, save_frames, raft_iters, log_fn, progress_fn, vram_sample_fn, done_fn`
 - **pip install timm requires --no-deps** — without it pip pulls torch from PyPI and destroys the custom wheel.
+- **PNG export reads from MP4** — after `del comp_out, masked_out`, the PNG sequence export re-reads frames from the already-written `out_mp4` via `imageio.mimread`. This avoids holding a third full-resolution frame list alongside anything else. Slight quality note: re-encoding round-trip means PNG frames reflect the MP4's lossy compression, not the raw inference output. If lossless PNG from raw inference is needed in future, hold `comp_out` and skip the `del` before the PNG block.
+- **Log file guard pattern**: `_log_file = None` is declared before the `_log` closure (so closure captures the name, not the value). Assigned after the log path is known. The `None` guard in `_log` is critical — two early-return paths (video not found, mask not found) execute before the file is opened.
+- **`_vlog(label)` helper**: defined directly after `_prog` inside `run_inpainting()`. No-ops when CUDA is unavailable. Emits `[VRAM] <label>: alloc=X.XXgb  reserved=X.XXgb` — `memory_reserved()` is the key metric: it shows what the caching allocator is holding beyond active tensors. The gap between allocated and reserved is where ghost memory and fragmentation hide. Call sites at every discrete stage transition inside the chunk loop (10 points total — see Context.md for full list). All `_vlog` output goes to both the UI log widget and the run log file via `_log`.
+- **Static mask fast path in `read_mask()`**: when `len(masks_img) == 1`, dilate the single 2D array twice (flow + mask), replicate results to `length` PIL images, and return early — bypasses the chunked scipy loop entirely. For a 300-frame video this reduces scipy calls from `2 × ceil(300/32) = 20` down to `2`. The multi-frame chunked path is unchanged.
 
 ## Phase 2 plan
 DaVinci Resolve OpenFX node (C++ plugin) that calls into the Python inference stack. Phase 1 must be validated first.

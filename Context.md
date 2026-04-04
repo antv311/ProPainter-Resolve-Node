@@ -1,5 +1,5 @@
 # CLAUDE.md — ProPainter-Resolve-Node
-Last updated: 2026-04-01
+Last updated: 2026-04-04 (session 2)
 
 ---
 
@@ -381,6 +381,21 @@ Three-tab Tkinter benchmarking harness. No web server, no temp files, direct fil
 **Output naming:** `results/{stem}_{run_label}_inpainted.mp4` and
 `results/{stem}_{run_label}_comparison.mp4`
 
+**Persistent run log:** every `run_inpainting()` call opens
+`results/{stem}_{run_label}_{YYYYMMDD_HHMMSS}.log` (line-buffered, UTF-8).
+`_log()` dual-writes to UI widget and file. `try/finally` guarantees close even on OOM/crash.
+Log captures: settings dump, device info, per-chunk VRAM peak, post-loop VRAM snapshot, total time.
+
+**Granular VRAM tracing (`_vlog`):** a second helper inside `run_inpainting()` emits
+`[VRAM] <label>: alloc=X.XXgb  reserved=X.XXgb` at every stage transition inside the chunk loop.
+`memory_reserved()` shows what the caching allocator is holding beyond what tensors actively consume —
+the gap between allocated and reserved reveals allocator fragmentation / ghost memory.
+Trace points (in order per chunk):
+`WAFT→GPU`, `chunk tensors→GPU`, `WAFT sub {f}–{ef} done` (per sub-batch),
+`WAFT→CPU offloaded`, `flow_complete done`, `img_propagation done`,
+`inpaint f={f} pre-forward`, `inpaint f={f} post-del pred`, `inpaint f={f} post-cleanup`,
+`chunk teardown complete`.
+
 **Mask auto-detection:** extension-based — video exts → per-frame mask video
 (`_masks_from_video`), otherwise → static image mask (`read_mask`).
 
@@ -408,12 +423,26 @@ Three-tab Tkinter benchmarking harness. No web server, no temp files, direct fil
 | RAFT iterations spinbox (replaces hardcoded iters=20) | ✅ |
 | Save FPS override + Save frames PNG sequence export | ✅ |
 | Flow backbone honored in all three modes (single flow_model path, no hardcoded RAFT) | ✅ |
+| Persistent run log to disk (line-buffered, guaranteed close via finally) | ✅ |
+| Post-loop CUDA flush + VRAM snapshot before normalization | ✅ |
+| Per-tile cleanup in `_tile_flow()` (del intermediates + empty_cache each tile) | ✅ |
+| TurboQuant intermediate cleanup (del k_rot/residuals in compress_keys, v_rot in compress_values) | ✅ |
+| CPU RAM sequencing in write phase (del comp_frames → masked_for_save → comp_out/masked_out in order) | ✅ |
+| Granular VRAM tracing via `_vlog` (alloc + reserved at every stage transition in chunk loop) | ✅ |
+| Static mask fast path in `read_mask()` (dilate once, replicate — 2 scipy calls vs 2×ceil(N/32)) | ✅ |
 
 ---
 
 ## Git Log (recent)
 
 ```
+(latest) feat: granular VRAM tracing via _vlog (alloc+reserved at every chunk stage)
+(latest) fix: static mask fast path in read_mask() — dilate once, replicate
+(latest) fix: CPU RAM sequencing in write phase — del frame lists in order
+(latest) fix: TurboQuant intermediate cleanup in compress_keys/compress_values
+(latest) fix: per-tile del + empty_cache in _tile_flow()
+(latest) fix: post-loop CUDA flush + VRAM snapshot before normalization
+(latest) feat: persistent run log to disk (line-buffered, try/finally close)
 cbf8714 docs: update Context.md Tab 1 description for three-mode UI
 31715d9 feat: full ProPainter mode surface in tkinter harness
 456cb69 docs: update Context.md and CLAUDE.md post-optimization

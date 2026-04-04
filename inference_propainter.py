@@ -91,27 +91,36 @@ def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
         for mp in mnames:
             masks_img.append(Image.open(os.path.join(mpath, mp)))
 
-    # Expand a single mask image to length copies before entering the dilation loop
-    # so every frame has an explicit entry and chunked processing works uniformly.
+    # Static mask — dilate once, replicate (2 scipy calls vs 2×ceil(length/32))
     if len(masks_img) == 1:
-        masks_img = masks_img * length
+        single = np.array(masks_img[0].convert('L'))
+        if size is not None:
+            single = np.array(masks_img[0].resize(size, Image.NEAREST).convert('L'))
+        flow_single = (
+            scipy.ndimage.binary_dilation(single, iterations=flow_mask_dilates).astype(np.uint8)
+            if flow_mask_dilates > 0 else binary_mask(single).astype(np.uint8)
+        )
+        mask_single = (
+            scipy.ndimage.binary_dilation(single, iterations=mask_dilates).astype(np.uint8)
+            if mask_dilates > 0 else binary_mask(single).astype(np.uint8)
+        )
+        flow_masks    = [Image.fromarray(flow_single * 255)] * length
+        masks_dilated = [Image.fromarray(mask_single * 255)] * length
+        return flow_masks, masks_dilated
 
-    # Resize all frames and convert to uint8 numpy arrays upfront
+    # Multi-frame path — resize upfront then process in chunks of 32 so memory
+    # stays bounded for long videos.
     raw = []
     for mask_img in masks_img:
         if size is not None:
             mask_img = mask_img.resize(size, Image.NEAREST)
         raw.append(np.array(mask_img.convert('L')))
 
-    # Process dilation in chunks of 32 frames so memory stays bounded for long videos.
-    # scipy.ndimage.binary_dilation accepts a leading batch dimension (N, H, W) when
-    # iterations is given — the struct element is broadcast across frames.
     chunk_size = 32
     for chunk_start in range(0, len(raw), chunk_size):
         chunk = raw[chunk_start : chunk_start + chunk_size]
         batch = np.stack(chunk, axis=0)  # [N, H, W]
 
-        # Dilate 8 pixels so that all known pixels are trustworthy
         if flow_mask_dilates > 0:
             flow_batch = scipy.ndimage.binary_dilation(
                 batch, iterations=flow_mask_dilates
@@ -130,9 +139,9 @@ def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
                 [binary_mask(f).astype(np.uint8) for f in chunk], axis=0
             )
 
-        for flow_frame, mask_frame in zip(flow_batch, mask_batch):
-            flow_masks.append(Image.fromarray(flow_frame * 255))
-            masks_dilated.append(Image.fromarray(mask_frame * 255))
+        for flow_fr, mask_fr in zip(flow_batch, mask_batch):
+            flow_masks.append(Image.fromarray(flow_fr * 255))
+            masks_dilated.append(Image.fromarray(mask_fr * 255))
 
     return flow_masks, masks_dilated
 

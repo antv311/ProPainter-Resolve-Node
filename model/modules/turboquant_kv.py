@@ -213,6 +213,7 @@ class TurboQuantCompressor(nn.Module):
         proj = residual_norm @ self.J                                   # [..., jl_dim]
         qjl_signs = proj.sign().to(torch.int8)                          # ±1 as int8
 
+        del k_rot, k_recon, residual, residual_norm, proj
         return CompressedKeys(
             codes=codes,
             scales=scales.half(),
@@ -230,6 +231,7 @@ class TurboQuantCompressor(nn.Module):
         v_rot = self._rht(v.float())                                    # [..., c_head]
         scales = v_rot.norm(dim=-1, keepdim=True) / math.sqrt(self.c_head)
         codes = self._quantize(v_rot, scales)                           # uint8
+        del v_rot
         return CompressedValues(codes=codes, scales=scales.half())
 
     def asymmetric_attention_scores(
