@@ -314,8 +314,12 @@ def run_inpainting(
     done_fn receives (out_path, cmp_path, stats_dict).
     stats_dict keys: total_time, peak_vram, chunk_times, run_label.
     """
+    _log_file = None
+
     def _log(msg):
         log_fn(msg)
+        if _log_file is not None:
+            _log_file.write(msg + "\n")
 
     def _prog(val, desc=""):
         progress_fn(val, desc)
@@ -337,7 +341,17 @@ def run_inpainting(
                 done_fn(None, None, {})
                 return
 
-        run_label     = run_label.strip() or "run"
+        run_label  = run_label.strip() or "run"
+        safe_label = run_label.replace(" ", "_")
+        video_name = Path(video_path).stem
+        _ts        = time.strftime("%Y%m%d_%H%M%S")
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        _log_file  = open(
+            os.path.join(RESULTS_DIR, f"{video_name}_{safe_label}_{_ts}.log"),
+            "w", buffering=1, encoding="utf-8",
+        )
+        _log(f"  Log: {_log_file.name}")
+
         mask_is_video = (
             mode == "video_inpainting"
             and bool(mask_path)
@@ -672,7 +686,6 @@ def run_inpainting(
         except (ValueError, TypeError):
             pass
 
-        safe_label = run_label.replace(" ", "_")
         out_mp4    = os.path.join(RESULTS_DIR, f"{video_name}_{safe_label}_inpainted.mp4")
         cmp_mp4    = os.path.join(RESULTS_DIR, f"{video_name}_{safe_label}_comparison.mp4")
 
@@ -715,6 +728,9 @@ def run_inpainting(
         _log(traceback.format_exc())
         _log("── UI reset — you can change settings and try again ──")
         done_fn(None, None, {})
+    finally:
+        if _log_file is not None:
+            _log_file.close()
 
 
 # ── Tooltip helper ───────────────────────────────────────────────────────────
