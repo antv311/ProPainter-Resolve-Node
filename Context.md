@@ -394,23 +394,33 @@ Three-tab Tkinter benchmarking harness. No web server, no temp files, direct fil
 | torchvision read_video → cv2 | ✅ |
 | get_device() modernized (removed cudnn.is_available() guard) | ✅ |
 | tvdcn wired into recurrent_flow_completion.py | ✅ |
-| WAFT adapter (flow_comp_waft.py) | ✅ Complete |
-| TurboQuant hook (sparse_transformer.py + turboquant_kv.py) | ✅ |
-| Tkinter benchmarking harness | ✅ |
+| WAFT adapter (flow_comp_waft.py) — confirmed dav2/waft-a1 target, DA2 baked in | ✅ Complete |
+| FP16 WAFT toggle (independent of ProPainter FP16) | ✅ |
+| TurboQuant hook (sparse_transformer.py + turboquant_kv.py) — cosine sim 0.9675 at 3-bit | ✅ |
+| Tkinter benchmarking harness (three-tab: Run / Benchmark / Compare stub) | ✅ |
 | Runtime bug fixes (settings passthrough, flow cache eviction, tensor cleanup) | ✅ |
-| VRAM optimizations (inference_mode, WAFT CPU offload, 4K tiling, cudnn benchmark) | ✅ |
+| VRAM optimizations (inference_mode, WAFT CPU offload per chunk, 4K tiling, cudnn benchmark) | ✅ |
+| Error recovery (try/except wraps entire run_inpainting; Run button always re-enables) | ✅ |
+| Live VRAM bar in Tab 1 (updates every 500ms) | ✅ |
+| Tooltips on all Tab 1 controls (_Tooltip class) | ✅ |
+| Number of chunks auto-setting (auto-calculates subvideo_length; disables manual spinbox) | ✅ |
+| Full mode surface: Video Inpainting / Video Outpainting / Resolution Expansion | ✅ |
+| RAFT iterations spinbox (replaces hardcoded iters=20) | ✅ |
+| Save FPS override + Save frames PNG sequence export | ✅ |
+| Flow backbone honored in all three modes (single flow_model path, no hardcoded RAFT) | ✅ |
 
 ---
 
 ## Git Log (recent)
 
 ```
-(pending commit) runtime bugs + VRAM optimizations + device info logging
-(pending commit) Context.md / CLAUDE.md updates — WAFT confirmed dav2, backbone combobox, FP16 WAFT
+cbf8714 docs: update Context.md Tab 1 description for three-mode UI
+31715d9 feat: full ProPainter mode surface in tkinter harness
+456cb69 docs: update Context.md and CLAUDE.md post-optimization
+e27bfe5 runtime bugs + VRAM optimizations for RTX 3080
 c829fa7 cleanup: remove dead training/eval code and unused weights and fixed waft
 80244d3 Update WAFT submodule: remove torchvision from inference path
 590d30a Phase 1 complete: tkinter harness, merged Context.md, CLAUDE.md
-44a992f gradio: copy-first upload + manual H.264 convert button
 ```
 
 ---
