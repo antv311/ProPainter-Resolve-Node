@@ -362,7 +362,7 @@ Three-tab Tkinter benchmarking harness. No web server, no temp files, direct fil
 - Save FPS entry (blank = use source FPS; overrides output video fps)
 - Save frames checkbox (exports PNG sequence to results/{stem}_{label}_frames/)
 - Run button (inference in background thread, UI stays live)
-- Open results/ button
+- Open results/ button + Copy Log button (copies full log widget contents to clipboard)
 - Scrolled log widget + ttk.Progressbar + live VRAM bar (allocated / total GB, updates every 500ms)
 - Log emits: mode + settings dump, device info (GPU name, CUDA version, PyTorch version, total VRAM), WAFT CPU offload status, per-chunk peak VRAM
 
@@ -406,6 +406,8 @@ Trace points (in order per chunk):
 **Mask auto-detection:** extension-based — video exts → per-frame mask video
 (`_masks_from_video`), otherwise → static image mask (`read_mask`).
 
+**Per-run VRAM reset:** at the top of `run_inpainting()`, before the `try:` block, `gc.collect()` + `torch.cuda.empty_cache()` + `torch.cuda.reset_peak_memory_stats()` runs unconditionally (CUDA guard applied). Prevents ghost memory from a crashed or OOM'd run from carrying over into the next run in the same session.
+
 ---
 
 ## ProPainter Modernization Changes (Phase 1) — Status
@@ -441,6 +443,11 @@ Trace points (in order per chunk):
 | fwd/bwd flow CPU offload during WAFT sub-loop (ff/fb → cpu, cat back to GPU after loop) | ✅ |
 | `flow_complete` deterministic cuDNN context (prevents FFT/Winograd 20GiB workspace request) | ✅ |
 | `_tile_flow_complete()` — 2×2 spatial tiling of flow_complete for >1080p (matches WAFT tile pattern) | ✅ |
+| "Copy Log" button in Tab 1 (copies scrolled log widget to clipboard via `_copy_log()`) | ✅ |
+| `deform_conv2d` arg order fix for tvdcn 1.1.0 + `_pair()` helper for `List[int]` stride/padding/dilation (`recurrent_flow_completion.py`) | ✅ |
+| FP16 dtype cast in `_tile_flow()` — tile inputs cast to model dtype before WAFT forward, results always returned as float32 (`flow_comp_waft.py`) | ✅ |
+| `bilinear_sampler` grid dtype fix — `.to(img.dtype)` on `torch.cat([xgrid, ygrid])` prevents float32/float16 mismatch in `F.grid_sample` when FP16 WAFT is on (`WAFT/utils/utils.py`) | ✅ |
+| VRAM cleanup at `run_inpainting()` start — `gc.collect()` + `empty_cache()` + `reset_peak_memory_stats()` before every run to prevent ghost memory from crashed runs poisoning subsequent runs | ✅ |
 
 ---
 

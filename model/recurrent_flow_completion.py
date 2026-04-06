@@ -4,6 +4,9 @@ import torch.nn.functional as F
 from tvdcn.ops import deform_conv2d
 
 from model.modules.deformconv import ModulatedDeformConv2d
+
+def _pair(x):
+    return (x, x) if isinstance(x, int) else tuple(x)
 from .misc import constant_init
 
 class SecondOrderDeformableAlignment(ModulatedDeformConv2d):
@@ -39,9 +42,9 @@ class SecondOrderDeformableAlignment(ModulatedDeformConv2d):
         # mask
         mask = torch.sigmoid(mask)
 
-        return deform_conv2d(x, offset, self.weight, self.bias,
-                             self.stride, self.padding,
-                             self.dilation, mask)
+        return deform_conv2d(x, self.weight, offset, mask, self.bias,
+                             _pair(self.stride), _pair(self.padding),
+                             _pair(self.dilation))
 
 class BidirectionalPropagation(nn.Module):
     def __init__(self, channel):

@@ -192,7 +192,8 @@ class WAFT_bi(nn.Module):
             r2, c2 = r + th, c_ + tw
             t1 = img1[:, :, r:r2, c_:c2]
             t2 = img2[:, :, r:r2, c_:c2]
-            f  = self._waft(t1, t2)['flow'][-1].float()  # [B, 2, th, tw]
+            dtype = next(self._waft.parameters()).dtype
+            f  = self._waft(t1.to(dtype), t2.to(dtype))['flow'][-1].float()  # [B, 2, th, tw]
 
             # linear blend weight — ramps down in overlap regions
             wy = torch.ones(th, device=img1.device, dtype=torch.float32)

@@ -398,6 +398,13 @@ def run_inpainting(
          f"backbone={flow_backbone} fp16={fp16} fp16_waft={fp16_waft} "
          f"tq={use_tq} tq_bits={tq_bits} iters={raft_iters}")
 
+    # Force release any ghost memory from previous runs before model loading
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
     try:
         if not video_path or not os.path.isfile(video_path):
             _log("❌  Video file not found.")
@@ -1196,13 +1203,17 @@ class App(tk.Tk):
         btn_frame.grid(row=row, column=0, columnspan=3, sticky="ew")
         btn_frame.columnconfigure(0, weight=1)
         btn_frame.columnconfigure(1, weight=1)
+        btn_frame.columnconfigure(2, weight=1)
 
         self._run_btn = ttk.Button(btn_frame, text="▶  Run Inpainting",
                                    command=self._on_run)
         self._run_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4), ipady=4)
         ttk.Button(btn_frame, text="Open results/",
                    command=self._open_results).grid(
-            row=0, column=1, sticky="ew", ipady=4)
+            row=0, column=1, sticky="ew", padx=(0, 4), ipady=4)
+        ttk.Button(btn_frame, text="Copy Log",
+                   command=self._copy_log).grid(
+            row=0, column=2, sticky="ew", ipady=4)
 
     def _build_run_right(self, p):
         p.rowconfigure(1, weight=1)
@@ -1324,6 +1335,11 @@ class App(tk.Tk):
             import subprocess; subprocess.Popen(["open", target])
         else:
             import subprocess; subprocess.Popen(["xdg-open", target])
+
+    def _copy_log(self):
+        text = self._log_box.get("1.0", tk.END)
+        self.clipboard_clear()
+        self.clipboard_append(text)
 
     def _on_run(self):
         if self._running:
