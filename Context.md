@@ -1,5 +1,5 @@
 # CLAUDE.md — ProPainter-Resolve-Node
-Last updated: 2026-04-04 (session 2)
+Last updated: 2026-04-05
 
 ---
 
@@ -381,6 +381,13 @@ Three-tab Tkinter benchmarking harness. No web server, no temp files, direct fil
 **Output naming:** `results/{stem}_{run_label}_inpainted.mp4` and
 `results/{stem}_{run_label}_comparison.mp4`
 
+**4K flow_complete tiling:** `_tile_flow_complete()` splits `gt_flows_bi` and `fmasks_t` into
+a 2×2 overlapping spatial grid (64px overlap, linear blend) when `h > 1080 or w > 1920`,
+runs `forward_bidirect_flow` + `combine_flow` on each quarter-resolution tile inside a
+deterministic cuDNN context, then stitches back. Prevents the Conv3d encoder from requesting
+a 20 GiB FFT/Winograd workspace at 4K. Each tile frees intermediates and calls `empty_cache()`
+before the next tile. Below 1080p the deterministic context runs on the full tensor directly.
+
 **Persistent run log:** every `run_inpainting()` call opens
 `results/{stem}_{run_label}_{YYYYMMDD_HHMMSS}.log` (line-buffered, UTF-8).
 `_log()` dual-writes to UI widget and file. `try/finally` guarantees close even on OOM/crash.
@@ -430,12 +437,19 @@ Trace points (in order per chunk):
 | CPU RAM sequencing in write phase (del comp_frames → masked_for_save → comp_out/masked_out in order) | ✅ |
 | Granular VRAM tracing via `_vlog` (alloc + reserved at every stage transition in chunk loop) | ✅ |
 | Static mask fast path in `read_mask()` (dilate once, replicate — 2 scipy calls vs 2×ceil(N/32)) | ✅ |
+| `cudnn.benchmark=False` + `expandable_segments:True` env var to reduce allocator fragmentation | ✅ |
+| fwd/bwd flow CPU offload during WAFT sub-loop (ff/fb → cpu, cat back to GPU after loop) | ✅ |
+| `flow_complete` deterministic cuDNN context (prevents FFT/Winograd 20GiB workspace request) | ✅ |
+| `_tile_flow_complete()` — 2×2 spatial tiling of flow_complete for >1080p (matches WAFT tile pattern) | ✅ |
 
 ---
 
 ## Git Log (recent)
 
 ```
+(latest) fix: _tile_flow_complete() — 2x2 tiling for flow_complete at >1080p
+(latest) fix: flow_complete deterministic cuDNN context (Option A — insufficient alone)
+(latest) fix: fwd/bwd CPU offload in WAFT sub-loop; expandable_segments; benchmark=False
 (latest) feat: granular VRAM tracing via _vlog (alloc+reserved at every chunk stage)
 (latest) fix: static mask fast path in read_mask() — dilate once, replicate
 (latest) fix: CPU RAM sequencing in write phase — del frame lists in order

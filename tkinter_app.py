@@ -271,6 +271,69 @@ def _masks_from_video(path: str, video_length: int, size: tuple,
     )
 
 
+_FC_TILE_H = 1080
+_FC_TILE_W = 1920
+
+
+def _tile_flow_complete(flow_complete, gt_flows_bi, fmasks_t, device, overlap=64):
+    """
+    Run flow_complete.forward_bidirect_flow + combine_flow on overlapping 2×2 spatial tiles.
+    Used when the full-resolution Conv3d workspace exceeds available VRAM (typically 4K input).
+
+    gt_flows_bi : (fwd [b, t-1, 2, h, w],  bwd [b, t-1, 2, h, w])
+    fmasks_t    : [b, t, 1, h, w]
+    Returns     : (pred_fwd, pred_bwd) each [b, t-1, 2, h, w], same dtype as input
+    """
+    b, t_minus_1, _, h, w = gt_flows_bi[0].shape
+    th = (h + 1) // 2
+    tw = (w + 1) // 2
+
+    tile_coords = [
+        (0,      0     ),
+        (0,      w - tw),
+        (h - th, 0     ),
+        (h - th, w - tw),
+    ]
+
+    in_dtype   = gt_flows_bi[0].dtype
+    fwd_acc    = torch.zeros(b, t_minus_1, 2, h, w, device=device, dtype=torch.float32)
+    bwd_acc    = torch.zeros_like(fwd_acc)
+    weight_acc = torch.zeros(b, 1, 1, h, w, device=device, dtype=torch.float32)
+
+    for (r, c) in tile_coords:
+        r2, c2 = r + th, c + tw
+
+        gf_fwd = gt_flows_bi[0][:, :, :, r:r2, c:c2]
+        gf_bwd = gt_flows_bi[1][:, :, :, r:r2, c:c2]
+        fm_t   = fmasks_t[:, :, :, r:r2, c:c2]
+
+        with torch.backends.cudnn.flags(benchmark=False, deterministic=True):
+            pred_bi, _ = flow_complete.forward_bidirect_flow((gf_fwd, gf_bwd), fm_t)
+            pred_bi    = flow_complete.combine_flow((gf_fwd, gf_bwd), pred_bi, fm_t)
+
+        # linear blend weight — ramps in overlap zones
+        wy = torch.ones(th, device=device, dtype=torch.float32)
+        wx = torch.ones(tw, device=device, dtype=torch.float32)
+        if r > 0:   wy[:overlap]  = torch.linspace(0, 1, overlap, device=device)
+        if r2 < h:  wy[-overlap:] = torch.linspace(1, 0, overlap, device=device)
+        if c > 0:   wx[:overlap]  = torch.linspace(0, 1, overlap, device=device)
+        if c2 < w:  wx[-overlap:] = torch.linspace(1, 0, overlap, device=device)
+        wt = (wy.view(1, 1, 1, th, 1) * wx.view(1, 1, 1, 1, tw))  # [1,1,1,th,tw]
+
+        fwd_acc[:, :, :, r:r2, c:c2]    += pred_bi[0].float() * wt
+        bwd_acc[:, :, :, r:r2, c:c2]    += pred_bi[1].float() * wt
+        weight_acc[:, :, :, r:r2, c:c2] += wt
+
+        del gf_fwd, gf_bwd, fm_t, pred_bi, wt, wy, wx
+        torch.cuda.empty_cache()
+
+    weight_acc = weight_acc.clamp(min=1e-6)
+    return (
+        (fwd_acc / weight_acc).to(in_dtype),
+        (bwd_acc / weight_acc).to(in_dtype),
+    )
+
+
 def _write_comparison(left_frames, right_frames, fps: float, out_path: str):
     with imageio.get_writer(out_path, fps=fps, quality=7, macro_block_size=1) as w:
         for lf, rf in zip(left_frames, right_frames):
@@ -383,7 +446,11 @@ def run_inpainting(
         use_half = bool(fp16) and device.type == "cuda"
 
         if device.type == 'cuda':
-            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.deterministic = False  # keep speed, just not benchmark mode
+            # expandable_segments lets the allocator grow/shrink segments rather than
+            # holding fragmented blocks — reduces the reserved-but-unallocated gap
+            os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
         # ── device info ───────────────────────────────────────────────────────
         _log("── Compute device ─────────────────────────────────────")
@@ -564,11 +631,17 @@ def run_inpainting(
                             ef = min(chunk_len, f + scl)
                             sl = frames_t[:, f:ef] if f == 0 else frames_t[:, f - 1:ef]
                             ff, fb = flow_model(sl, iters=raft_iters)
-                            fwd_list.append(ff)
-                            bwd_list.append(fb)
+                            fwd_list.append(ff.cpu())
+                            bwd_list.append(fb.cpu())
+                            del ff, fb
                             torch.cuda.empty_cache()
                             _vlog(f"  WAFT sub {f}–{ef} done")
-                        gt_flows_bi = (torch.cat(fwd_list, dim=1), torch.cat(bwd_list, dim=1))
+                        gt_flows_bi = (
+                            torch.cat(fwd_list, dim=1).to(device),
+                            torch.cat(bwd_list, dim=1).to(device),
+                        )
+                        del fwd_list, bwd_list
+                        torch.cuda.empty_cache()
                     else:
                         gt_flows_bi = flow_model(frames_t, iters=raft_iters)
                         torch.cuda.empty_cache()
@@ -592,8 +665,14 @@ def run_inpainting(
                     mdil_t      = mdil_t.half()
                     gt_flows_bi = (gt_flows_bi[0].half(), gt_flows_bi[1].half())
 
-                pred_flows_bi, _ = flow_complete.forward_bidirect_flow(gt_flows_bi, fmasks_t)
-                pred_flows_bi    = flow_complete.combine_flow(gt_flows_bi, pred_flows_bi, fmasks_t)
+                if h > _FC_TILE_H or w > _FC_TILE_W:
+                    pred_flows_bi = _tile_flow_complete(
+                        flow_complete, gt_flows_bi, fmasks_t, device
+                    )
+                else:
+                    with torch.backends.cudnn.flags(benchmark=False, deterministic=True):
+                        pred_flows_bi, _ = flow_complete.forward_bidirect_flow(gt_flows_bi, fmasks_t)
+                        pred_flows_bi    = flow_complete.combine_flow(gt_flows_bi, pred_flows_bi, fmasks_t)
                 torch.cuda.empty_cache()
                 _vlog("flow_complete done")
 
