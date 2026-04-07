@@ -1,5 +1,5 @@
 # CLAUDE.md — ProPainter-Resolve-Node
-Last updated: 2026-04-05
+Last updated: 2026-04-07
 
 ---
 
@@ -388,6 +388,18 @@ deterministic cuDNN context, then stitches back. Prevents the Conv3d encoder fro
 a 20 GiB FFT/Winograd workspace at 4K. Each tile frees intermediates and calls `empty_cache()`
 before the next tile. Below 1080p the deterministic context runs on the full tensor directly.
 
+**4K InpaintGenerator tiling:** `_tile_inpaint()` mirrors `_tile_flow_complete()` for the
+`inpaint_model(...)` call. At 4K, `SparseWindowAttention` broadcasts pooled global context to
+all 1,296 windows via `.repeat()`, producing ~38.7 GB tensors (pool_k + pool_v). Tiling to
+≈1080p tiles reduces windows to 324 and pool_k to ~1.2 GB at FP16. Uses the same 2×2
+overlapping grid but with **128px overlap** (wider than flow_complete's 64px — the transformer's
+attention receptive field spans ~60–108px per window, so 128px covers ~2 window heights at the
+boundary). Flow vectors are NOT offset for tile position (same as all existing tilers — flow
+values are frame-to-frame displacements, not absolute coords). Output is float32 `[b*l_t, 3, h, w]`
+matching the non-tiled path's shape before `(pred + 1) / 2`. Known quality risk: the pooled
+global context is computed per-tile, so tiles see different "global" context — may produce soft
+seams at tile boundaries (~x=1920, y=1080). Linear blending mitigates but does not eliminate this.
+
 **Persistent run log:** every `run_inpainting()` call opens
 `results/{stem}_{run_label}_{YYYYMMDD_HHMMSS}.log` (line-buffered, UTF-8).
 `_log()` dual-writes to UI widget and file. `try/finally` guarantees close even on OOM/crash.
@@ -445,6 +457,8 @@ Trace points (in order per chunk):
 | `_tile_flow_complete()` — 2×2 spatial tiling of flow_complete for >1080p (matches WAFT tile pattern) | ✅ |
 | "Copy Log" button in Tab 1 (copies scrolled log widget to clipboard via `_copy_log()`) | ✅ |
 | `deform_conv2d` arg order fix for tvdcn 1.1.0 + `_pair()` helper for `List[int]` stride/padding/dilation (`recurrent_flow_completion.py`) | ✅ |
+| `deform_conv2d` arg order fix in `model/propainter.py` `DeformableAlignment.forward()` — keyword args + `_pair()` from `torch.nn.modules.utils` (same tvdcn signature fix as recurrent_flow_completion.py) | ✅ |
+| `_tile_inpaint()` — 2×2 spatial tiling of InpaintGenerator for >1080p; 128px overlap; prevents ~38.7 GB pool_k/pool_v repeat at 4K | ✅ |
 | FP16 dtype cast in `_tile_flow()` — tile inputs cast to model dtype before WAFT forward, results always returned as float32 (`flow_comp_waft.py`) | ✅ |
 | `bilinear_sampler` grid dtype fix — `.to(img.dtype)` on `torch.cat([xgrid, ygrid])` prevents float32/float16 mismatch in `F.grid_sample` when FP16 WAFT is on (`WAFT/utils/utils.py`) | ✅ |
 | VRAM cleanup at `run_inpainting()` start — `gc.collect()` + `empty_cache()` + `reset_peak_memory_stats()` before every run to prevent ghost memory from crashed runs poisoning subsequent runs | ✅ |
@@ -454,6 +468,8 @@ Trace points (in order per chunk):
 ## Git Log (recent)
 
 ```
+(latest) fix: _tile_inpaint() — 2x2 tiling for InpaintGenerator at >1080p; 128px overlap
+(latest) fix: deform_conv2d keyword args + _pair() in propainter.py DeformableAlignment.forward()
 (latest) fix: _tile_flow_complete() — 2x2 tiling for flow_complete at >1080p
 (latest) fix: flow_complete deterministic cuDNN context (Option A — insufficient alone)
 (latest) fix: fwd/bwd CPU offload in WAFT sub-loop; expandable_segments; benchmark=False

@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tvdcn.ops import deform_conv2d
+from torch.nn.modules.utils import _pair
 
 from einops import rearrange
 
@@ -64,9 +65,17 @@ class DeformableAlignment(ModulatedDeformConv2d):
         # mask
         mask = torch.sigmoid(mask)
 
-        return deform_conv2d(x, offset, self.weight, self.bias,
-                             self.stride, self.padding,
-                             self.dilation, mask)
+        print(f"DEBUG bias type={type(self.bias)} stride type={type(self.stride)}")
+        return deform_conv2d(
+            input=x,
+            weight=self.weight,
+            offset=offset,
+            mask=mask,
+            bias=self.bias,
+            stride=_pair(self.stride),
+            padding=_pair(self.padding),
+            dilation=_pair(self.dilation),
+        )
 
 
 class BidirectionalPropagation(nn.Module):

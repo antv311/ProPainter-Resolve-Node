@@ -334,6 +334,64 @@ def _tile_flow_complete(flow_complete, gt_flows_bi, fmasks_t, device, overlap=64
     )
 
 
+def _tile_inpaint(inpaint_model, sel_imgs, sel_flows, sel_masks, sel_upd_mask, l_t,
+                  device, overlap=128):
+    """
+    Run inpaint_model on overlapping 2×2 spatial tiles.
+    Used when the sparse transformer's pool_k/pool_v repeat would exceed VRAM (typically 4K input).
+
+    sel_imgs      : [b, T, 3, h, w]
+    sel_flows     : (fwd [b, l_t-1, 2, h, w], bwd [b, l_t-1, 2, h, w])
+    sel_masks     : [b, T, 1, h, w]
+    sel_upd_mask  : [b, T, 1, h, w]
+    l_t           : int — number of local (neighbor) frames
+    Returns       : [b*l_t, 3, h, w], float32, range [-1, 1]
+    """
+    b, T, _, h, w = sel_imgs.shape
+    th = (h + 1) // 2
+    tw = (w + 1) // 2
+
+    tile_coords = [
+        (0,      0     ),
+        (0,      w - tw),
+        (h - th, 0     ),
+        (h - th, w - tw),
+    ]
+
+    pred_acc   = torch.zeros(b * l_t, 3, h, w, device=device, dtype=torch.float32)
+    weight_acc = torch.zeros(b * l_t, 1, h, w, device=device, dtype=torch.float32)
+
+    for (r, c) in tile_coords:
+        r2, c2 = r + th, c + tw
+
+        t_sel_imgs     = sel_imgs    [:, :, :, r:r2, c:c2]
+        t_sel_masks    = sel_masks   [:, :, :, r:r2, c:c2]
+        t_sel_upd_mask = sel_upd_mask[:, :, :, r:r2, c:c2]
+        t_sel_flows    = (sel_flows[0][:, :, :, r:r2, c:c2],
+                          sel_flows[1][:, :, :, r:r2, c:c2])
+
+        tile_pred = inpaint_model(t_sel_imgs, t_sel_flows, t_sel_masks, t_sel_upd_mask, l_t)
+        tile_pred = tile_pred.view(-1, 3, th, tw)  # [b*l_t, 3, th, tw]
+
+        # linear blend weight — ramps in overlap zones
+        wy = torch.ones(th, device=device, dtype=torch.float32)
+        wx = torch.ones(tw, device=device, dtype=torch.float32)
+        if r > 0:   wy[:overlap]  = torch.linspace(0, 1, overlap, device=device)
+        if r2 < h:  wy[-overlap:] = torch.linspace(1, 0, overlap, device=device)
+        if c > 0:   wx[:overlap]  = torch.linspace(0, 1, overlap, device=device)
+        if c2 < w:  wx[-overlap:] = torch.linspace(1, 0, overlap, device=device)
+        wt = wy.view(1, 1, th, 1) * wx.view(1, 1, 1, tw)  # [1, 1, th, tw]
+
+        pred_acc  [:, :, r:r2, c:c2] += tile_pred.float() * wt
+        weight_acc[:, :, r:r2, c:c2] += wt
+
+        del t_sel_imgs, t_sel_masks, t_sel_upd_mask, t_sel_flows, tile_pred, wt, wy, wx
+        torch.cuda.empty_cache()
+
+    weight_acc = weight_acc.clamp(min=1e-6)
+    return pred_acc / weight_acc  # [b*l_t, 3, h, w], float32
+
+
 def _write_comparison(left_frames, right_frames, fps: float, out_path: str):
     with imageio.get_writer(out_path, fps=fps, quality=7, macro_block_size=1) as w:
         for lf, rf in zip(left_frames, right_frames):
@@ -716,8 +774,15 @@ def run_inpainting(
                 with torch.inference_mode():
                     _vlog(f"  inpaint f={f} pre-forward")
                     l_t  = len(nb_ids)
-                    pred = inpaint_model(sel_imgs, sel_flows, sel_masks, sel_upd_mask, l_t)
-                    pred = pred.view(-1, 3, h, w)
+                    if h > _FC_TILE_H or w > _FC_TILE_W:
+                        pred = _tile_inpaint(
+                            inpaint_model, sel_imgs, sel_flows, sel_masks, sel_upd_mask,
+                            l_t, device
+                        )
+                        # pred already [b*l_t, 3, h, w] float32
+                    else:
+                        pred = inpaint_model(sel_imgs, sel_flows, sel_masks, sel_upd_mask, l_t)
+                        pred = pred.view(-1, 3, h, w)
                     pred = (pred + 1) / 2
                     pred_np   = pred.cpu().permute(0, 2, 3, 1).numpy() * 255
                     bin_masks = mdil_t[0, nb_ids].cpu().permute(0, 2, 3, 1).numpy().astype(np.uint8)
