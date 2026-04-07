@@ -1,3 +1,0 @@
-[submodule "thirdparty/dinov3"]
-	path = thirdparty/dinov3
-	url = https://github.com/facebookresearch/dinov3.git
